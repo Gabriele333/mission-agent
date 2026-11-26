@@ -1,0 +1,687 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMemoryStore } from '../../db/index.js';
+import { describeApproval } from '../../safety/index.js';
+import { SYS_GENERAL, type ApprovalAnswer, type ApprovalRequest, type IncomingMessage, type Store, type SurfaceHost } from '../../types.js';
+import { createTelegramSurface, OFFSET_STATE_KEY, REASON_WAIT_MS, type TelegramSurfaceOptions } from './surface.js';
+import { fakeTelegram, messageUpdate, OTHER, pressUpdate, settle, textUpdate, TOKEN, USER, type FakeTelegram } from './test-helpers.js';
+
+const M1 = 'm_k7q3zp2xw9ha';
+const NAMES: Record<string, string> = { [M1]: 'inbox-curator', [SYS_GENERAL]: 'general' };
+
+let root: string;
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.setSystemTime(new Date('2026-11-25T10:00:00Z'));
+  root = mkdtempSync(join(tmpdir(), 'tg-surface-'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+  rmSync(root, { recursive: true, force: true });
+});
+
+async function until(cond: () => boolean, what = 'condition'): Promise<void> {
+  for (let i = 0; i < 500; i++) {
+    if (cond()) return;
+    await settle(2);
+  }
+  throw new Error(`Timed out waiting for ${what}`);
+}
+
+function setup(opts: { tg?: FakeTelegram; store?: Store; over?: Partial<TelegramSurfaceOptions> } = {}) {
+  const tg = opts.tg ?? fakeTelegram();
+  const store = opts.store ?? createMemoryStore();
+  const incoming: IncomingMessage[] = [];
+  const answers: [string, ApprovalAnswer][] = [];
+  const waiting = new Set<string>();
+  const errors: Error[] = [];
+  const host: SurfaceHost = {
+    incoming: async (m) => void incoming.push(m),
+    answerApproval: (id, a) => {
+      if (!waiting.has(id)) return false;
+      waiting.delete(id);
+      answers.push([id, a]);
+      return true;
+    },
+    label: (id) => `Ada · ${NAMES[id ?? SYS_GENERAL] ?? id}`,
+    store,
+  };
+  const surface = createTelegramSurface({
+    token: () => TOKEN,
+    userId: () => USER,
+    dataDir: (id) => join(root, 'missions', id, 'data'),
+    missionName: (id) => NAMES[id],
+    generalMissionId: SYS_GENERAL,
+    fetchFn: tg.fetchFn,
+    onError: (e) => void errors.push(e),
+    ...opts.over,
+  });
+  return { tg, store, surface, host, incoming, answers, waiting, errors };
+}
+
+async function started(opts: Parameters<typeof setup>[0] = {}) {
+  const s = setup(opts);
+  await s.surface.start(s.host);
+  await until(() => s.tg.calls('getUpdates').length > 0, 'first poll');
+  return s;
+}
+
+function request(over: Partial<ApprovalRequest> = {}): ApprovalRequest {
+  return {
+    id: 'apr_0123456789abcdef',
+    missionId: M1,
+    action: 'action:email.send',
+    toolName: 'mcp__gmail__send',
+    input: { to: 'bob@example.com', subject: 'Hi' },
+    createdAt: '2026-11-25T10:00:00.000Z',
+    expiresAt: '2026-11-26T10:00:00.000Z',
+    ...over,
+  };
+}
+
+function keyboardOf(params: Record<string, unknown>) {
+  return (params.reply_markup as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard;
+}
+
+describe('start and polling', () => {
+  it('checks the bot, then long-polls for messages and button presses only', async () => {
+    const { tg, surface, errors } = await started();
+    expect(tg.calls('getMe')).toHaveLength(1);
+    const poll = tg.calls('getUpdates')[0]!.params;
+    expect(poll).toMatchObject({ timeout: 30, allowed_updates: ['message', 'callback_query'] });
+    expect(poll.offset).toBeUndefined();
+    expect(errors).toEqual([]);
+    await surface.stop();
+  });
+
+  it('reports when topic mode is off', async () => {
+    const tg = fakeTelegram();
+    tg.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', has_topics_enabled: false } }));
+    const { surface, errors } = await started({ tg });
+    expect(errors.map((e) => e.message).join()).toMatch(/Topic mode is off/);
+    await surface.stop();
+  });
+
+  it('stop() ends a waiting long poll at once and polls no more', async () => {
+    const { tg, surface } = await started();
+    const before = tg.calls('getUpdates').length;
+    await surface.stop();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(tg.calls('getUpdates').length).toBe(before);
+    await expect(surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'x' })).rejects.toThrow(/stopped/);
+  });
+
+  it('retries a failed poll with a growing wait and reports it without the token', async () => {
+    const tg = fakeTelegram();
+    tg.script('getUpdates', () => 'network');
+    tg.script('getUpdates', () => ({ ok: false, error_code: 409, description: 'Conflict: terminated by other getUpdates request' }));
+    const { surface, errors, host } = setup({ tg });
+    await surface.start(host);
+    await until(() => tg.calls('getUpdates').length === 1, 'first poll');
+    await settle();
+    expect(errors).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    await until(() => tg.calls('getUpdates').length === 2, 'second poll');
+    await settle();
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(tg.calls('getUpdates')).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await until(() => tg.calls('getUpdates').length === 3, 'third poll');
+    expect(errors).toHaveLength(2);
+    for (const e of errors) {
+      expect(e.message).not.toContain(TOKEN);
+      expect(e.message).not.toContain(TOKEN.split(':')[1]);
+    }
+    await surface.stop();
+  });
+
+  it('waits retry_after seconds when polling is rate limited', async () => {
+    const tg = fakeTelegram();
+    tg.script('getUpdates', () => ({ ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 9 } }));
+    const s = setup({ tg });
+    await s.surface.start(s.host);
+    await until(() => tg.calls('getUpdates').length === 1, 'first poll');
+    await vi.advanceTimersByTimeAsync(8_999);
+    expect(tg.calls('getUpdates')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await until(() => tg.calls('getUpdates').length === 2, 'second poll');
+    await s.surface.stop();
+  });
+});
+
+describe('sender check', () => {
+  it('passes on messages from the user in the private chat only, and answers no one else', async () => {
+    const s = await started();
+    s.tg.push(
+      textUpdate(s.tg, 'from a stranger', { from: OTHER }),
+      textUpdate(s.tg, 'from the user in a group', { chatId: -100123, chatType: 'supergroup' }),
+      textUpdate(s.tg, 'stranger in the user chat id', { from: OTHER, chatId: USER }),
+      textUpdate(s.tg, 'hello'),
+    );
+    await until(() => s.incoming.length === 1, 'incoming');
+    await settle();
+    expect(s.incoming).toEqual([{ surface: 'surface:telegram', text: 'hello' }]);
+    expect(s.tg.calls('sendMessage')).toHaveLength(0);
+    await s.surface.stop();
+  });
+
+  it('drops everything when the user is not set', async () => {
+    const s = await started({ over: { userId: () => undefined } });
+    s.tg.push(textUpdate(s.tg, 'hello'), pressUpdate(s.tg, 'a:apr_x', 5));
+    await until(() => s.store.getState(OFFSET_STATE_KEY) !== undefined, 'offset');
+    await settle();
+    expect(s.incoming).toEqual([]);
+    expect(s.tg.calls('answerCallbackQuery')).toHaveLength(0);
+    await s.surface.stop();
+  });
+
+  it('ignores button presses from another account or another chat, without an answer', async () => {
+    const s = await started();
+    s.waiting.add('apr_1');
+    const last = pressUpdate(s.tg, 'a:apr_1', 5, { chatId: -100123, chatType: 'supergroup' });
+    s.tg.push(pressUpdate(s.tg, 'a:apr_1', 5, { from: OTHER }), last);
+    await until(() => JSON.parse(s.store.getState(OFFSET_STATE_KEY) ?? '{"offset":0}').offset === last.update_id + 1, 'offset');
+    await settle();
+    expect(s.answers).toEqual([]);
+    expect(s.tg.calls('answerCallbackQuery')).toHaveLength(0);
+    s.tg.push(pressUpdate(s.tg, 'a:apr_1', 5));
+    await until(() => s.answers.length === 1, 'answer');
+    expect(s.answers).toEqual([['apr_1', { kind: 'approved' }]]);
+    await until(() => s.tg.calls('answerCallbackQuery').length === 1, 'callback answer');
+    await s.surface.stop();
+  });
+});
+
+describe('threads', () => {
+  it('creates a thread on the first message and reuses it', async () => {
+    const s = await started();
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'first' });
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'second' });
+    const created = s.tg.calls('createForumTopic');
+    expect(created).toHaveLength(1);
+    expect(created[0]!.params).toEqual({ chat_id: USER, name: 'Ada · inbox-curator' });
+    const thread = s.store.getThread(M1);
+    expect(thread).toBe(500);
+    const sent = s.tg.calls('sendMessage').map((r) => r.params);
+    expect(sent).toEqual([
+      { chat_id: USER, message_thread_id: 500, text: 'first' },
+      { chat_id: USER, message_thread_id: 500, text: 'second' },
+    ]);
+    await s.surface.stop();
+  });
+
+  it('createThread stores the id; a second call renames instead of creating', async () => {
+    const s = await started();
+    await s.surface.createThread!(M1, 'Ada · inbox-curator');
+    expect(s.store.getThread(M1)).toBe(500);
+    expect(s.store.missionOfThread(500)).toBe(M1);
+    await s.surface.createThread!(M1, 'Ada · inbox-curator');
+    expect(s.tg.calls('createForumTopic')).toHaveLength(1);
+    expect(s.tg.calls('editForumTopic')).toHaveLength(1);
+    await s.surface.stop();
+  });
+
+  it('renames the thread with the label it is given', async () => {
+    const s = await started();
+    await s.surface.createThread!(M1, 'Ada · inbox-curator');
+    await s.surface.renameThread!(M1, 'Ada · inbox-curator frozen');
+    expect(s.tg.calls('editForumTopic')[0]!.params).toEqual({ chat_id: USER, message_thread_id: 500, name: 'Ada · inbox-curator frozen' });
+    // The same name again: Telegram says "not modified", which is not an error.
+    s.tg.script('editForumTopic', () => ({ ok: false, error_code: 400, description: 'Bad Request: TOPIC_NOT_MODIFIED' }));
+    await expect(s.surface.renameThread!(M1, 'Ada · inbox-curator frozen')).resolves.toBeUndefined();
+    await s.surface.stop();
+  });
+
+  it('cuts a topic name to 128 characters', async () => {
+    const s = await started();
+    await s.surface.createThread!(M1, `Ada · ${'x'.repeat(300)}`);
+    expect(String(s.tg.calls('createForumTopic')[0]!.params.name).length).toBe(128);
+    await s.surface.stop();
+  });
+
+  it('deletes the thread and the stored id', async () => {
+    const s = await started();
+    await s.surface.createThread!(M1, 'Ada · inbox-curator');
+    await s.surface.deleteThread!(M1);
+    expect(s.tg.calls('deleteForumTopic')[0]!.params).toEqual({ chat_id: USER, message_thread_id: 500 });
+    expect(s.store.getThread(M1)).toBeUndefined();
+    // Nothing stored: nothing to delete.
+    await s.surface.deleteThread!(M1);
+    expect(s.tg.calls('deleteForumTopic')).toHaveLength(1);
+    await s.surface.stop();
+  });
+
+  it('removes the stored id when Telegram refuses the delete with 400', async () => {
+    const s = await started();
+    await s.surface.createThread!(M1, 'Ada · inbox-curator');
+    s.tg.script('deleteForumTopic', () => ({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' }));
+    await s.surface.deleteThread!(M1);
+    expect(s.store.getThread(M1)).toBeUndefined();
+    await s.surface.stop();
+  });
+
+  it('creates the thread again when Telegram says it no longer exists', async () => {
+    const s = await started();
+    await s.surface.createThread!(M1, 'Ada · inbox-curator');
+    s.tg.script('sendMessage', () => ({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' }));
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'hello' });
+    expect(s.tg.calls('createForumTopic')).toHaveLength(2);
+    expect(s.store.getThread(M1)).toBe(501);
+    expect(s.tg.calls('sendMessage').at(-1)!.params).toMatchObject({ message_thread_id: 501, text: 'hello' });
+    await s.surface.stop();
+  });
+});
+
+describe('incoming messages', () => {
+  it('routes by thread: a mission thread sets the mission; the general thread, no thread and an unknown thread do not', async () => {
+    const s = await started();
+    s.store.setThread(M1, 41);
+    s.store.setThread(SYS_GENERAL, 40);
+    s.tg.push(
+      textUpdate(s.tg, 'for the mission', { thread: 41 }),
+      textUpdate(s.tg, 'in general', { thread: 40 }),
+      textUpdate(s.tg, 'outside threads'),
+      textUpdate(s.tg, 'unknown thread', { thread: 99 }),
+    );
+    await until(() => s.incoming.length === 4, 'incoming');
+    expect(s.incoming).toEqual([
+      { surface: 'surface:telegram', text: 'for the mission', missionId: M1 },
+      { surface: 'surface:telegram', text: 'in general' },
+      { surface: 'surface:telegram', text: 'outside threads' },
+      { surface: 'surface:telegram', text: 'unknown thread' },
+    ]);
+    await s.surface.stop();
+  });
+
+  it('passes commands on unchanged', async () => {
+    const s = await started();
+    s.store.setThread(M1, 41);
+    s.tg.push(textUpdate(s.tg, '/stop', { thread: 41 }), textUpdate(s.tg, '/pause'));
+    await until(() => s.incoming.length === 2, 'incoming');
+    expect(s.incoming).toEqual([
+      { surface: 'surface:telegram', text: '/stop', missionId: M1 },
+      { surface: 'surface:telegram', text: '/pause' },
+    ]);
+    await s.surface.stop();
+  });
+
+  it('does not wait for the run of a message before reading the next update', async () => {
+    const s = setup();
+    let release!: () => void;
+    s.host.incoming = (m) => {
+      s.incoming.push(m);
+      return new Promise<void>((r) => (release = r));
+    };
+    await s.surface.start(s.host);
+    s.waiting.add('apr_1');
+    s.tg.push(textUpdate(s.tg, 'long run'), pressUpdate(s.tg, 'a:apr_1', 5));
+    await until(() => s.answers.length === 1, 'approval during a run');
+    release();
+    await s.surface.stop();
+  });
+
+  it('tells the user when a kind of message is not supported, and ignores service messages', async () => {
+    const s = await started();
+    s.tg.push(
+      messageUpdate(s.tg, { sticker: {} } as never),
+      messageUpdate(s.tg, { forum_topic_created: { name: 'x' } } as never),
+    );
+    await until(() => s.tg.calls('sendMessage').length === 1, 'note');
+    await settle();
+    expect(String(s.tg.calls('sendMessage')[0]!.params.text)).toMatch(/not passed on/);
+    expect(s.tg.calls('sendMessage')).toHaveLength(1);
+    expect(s.incoming).toEqual([]);
+    await s.surface.stop();
+  });
+});
+
+describe('files from the user', () => {
+  it('saves a document with a hostile name in the data folder of the thread mission', async () => {
+    const s = await started();
+    s.store.setThread(M1, 41);
+    s.tg.files.set('documents/d1.bin', new TextEncoder().encode('one'));
+    s.tg.files.set('documents/d2.bin', new TextEncoder().encode('two'));
+    s.tg.push(
+      messageUpdate(s.tg, { thread: 41, caption: 'see this', document: { file_id: 'd1', file_name: '../../x/.evil.sh', file_size: 3 } }),
+      messageUpdate(s.tg, { thread: 41, document: { file_id: 'd2', file_name: '../../x/.evil.sh', file_size: 3 } }),
+    );
+    await until(() => s.incoming.length === 2, 'incoming');
+    const dir = join(root, 'missions', M1, 'data');
+    expect(s.incoming[0]).toEqual({ surface: 'surface:telegram', text: 'see this', missionId: M1, files: [join(dir, '_.._x_.evil.sh')] });
+    expect(s.incoming[1]).toEqual({ surface: 'surface:telegram', text: '', missionId: M1, files: [join(dir, '_.._x_.evil-1.sh')] });
+    expect(readFileSync(join(dir, '_.._x_.evil.sh'), 'utf8')).toBe('one');
+    expect(readFileSync(join(dir, '_.._x_.evil-1.sh'), 'utf8')).toBe('two');
+    expect(existsSync(join(root, 'missions', 'x'))).toBe(false);
+    await s.surface.stop();
+  });
+
+  it('saves a photo from the general thread in the general mission data folder, largest size first', async () => {
+    const s = await started();
+    s.tg.script('getFile', (p) => ({ ok: true, result: { file_id: p.file_id, file_size: 3, file_path: 'photos/file_7.jpg' } }));
+    s.tg.files.set('photos/file_7.jpg', new Uint8Array([1, 2, 3]));
+    s.tg.push(
+      messageUpdate(s.tg, {
+        date: 1_764_064_800,
+        photo: [
+          { file_id: 'small', width: 90, height: 90 },
+          { file_id: 'big', width: 1280, height: 960 },
+          { file_id: 'mid', width: 320, height: 240 },
+        ],
+      }),
+    );
+    await until(() => s.incoming.length === 1, 'incoming');
+    expect(s.tg.calls('getFile')[0]!.params).toEqual({ file_id: 'big' });
+    const path = join(root, 'missions', SYS_GENERAL, 'data', 'photo-20251125-100000.jpg');
+    expect(s.incoming[0]).toEqual({ surface: 'surface:telegram', text: '', files: [path] });
+    expect(existsSync(path)).toBe(true);
+    await s.surface.stop();
+  });
+
+  it('refuses a file over 20 MB before downloading it', async () => {
+    const s = await started();
+    s.tg.push(messageUpdate(s.tg, { caption: 'big', document: { file_id: 'd9', file_name: 'big.iso', file_size: 30_000_000 } }));
+    await until(() => s.tg.calls('sendMessage').length === 1, 'note');
+    expect(String(s.tg.calls('sendMessage')[0]!.params.text)).toMatch(/larger than 20 MB/);
+    expect(s.tg.calls('getFile')).toHaveLength(0);
+    expect(s.incoming).toEqual([]);
+    await s.surface.stop();
+  });
+});
+
+describe('sending', () => {
+  it('splits a long text into parts within the limit, in order, losing nothing', async () => {
+    const s = await started();
+    const text = Array.from({ length: 400 }, (_, i) => `Paragraph ${i} ${'é😀'.repeat(10)}`).join('\n\n');
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text });
+    const parts = s.tg.calls('sendMessage').map((r) => String(r.params.text));
+    expect(parts.length).toBeGreaterThan(2);
+    expect(parts.join('')).toBe(text);
+    for (const p of parts) expect(p.length).toBeLessThanOrEqual(4096);
+    await s.surface.stop();
+  });
+
+  it('sends plain text: no parse mode and no entities, whatever the text holds', async () => {
+    const s = await started();
+    const text = '<b>bold</b> *star* _under_ [link](http://x) `code`';
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text });
+    const params = s.tg.calls('sendMessage')[0]!.params;
+    expect(params.text).toBe(text);
+    expect(params).not.toHaveProperty('parse_mode');
+    expect(params).not.toHaveProperty('entities');
+    await s.surface.stop();
+  });
+
+  it('sends a notice that concerns no mission in the general thread', async () => {
+    const s = await started();
+    await s.surface.send({ missionId: null, label: 'Ada', text: 'The agent is paused.' });
+    expect(s.tg.calls('createForumTopic')[0]!.params.name).toBe('Ada · general');
+    expect(s.store.getThread(SYS_GENERAL)).toBe(500);
+    expect(s.tg.calls('sendMessage')[0]!.params).toMatchObject({ message_thread_id: 500, text: 'The agent is paused.' });
+    await s.surface.stop();
+  });
+
+  it('sends a file from the data folder as a document, and refuses one from elsewhere', async () => {
+    const s = await started();
+    const dir = join(root, 'missions', M1, 'data');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'report.pdf'), 'pdf');
+    writeFileSync(join(root, 'secret.txt'), 'secret');
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'Here it is.', filePath: join(dir, 'report.pdf') });
+    const doc = s.tg.calls('sendDocument')[0]!.params;
+    expect(doc.chat_id).toBe(String(USER));
+    expect(doc.message_thread_id).toBe('500');
+    expect(doc.caption).toBe('Here it is.');
+    expect((doc.document as File).name).toBe('report.pdf');
+    expect(await (doc.document as File).text()).toBe('pdf');
+    expect(doc).not.toHaveProperty('parse_mode');
+
+    await expect(
+      s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'leak', filePath: join(root, 'secret.txt') }),
+    ).rejects.toThrow(/not inside/);
+    expect(s.tg.calls('sendDocument')).toHaveLength(1);
+    expect(s.tg.calls('sendMessage')).toHaveLength(0);
+    await s.surface.stop();
+  });
+
+  it('retries a send after retry_after and delivers it once', async () => {
+    const s = await started();
+    s.store.setThread(M1, 41);
+    s.tg.script('sendMessage', () => ({ ok: false, error_code: 429, description: 'Too Many Requests: retry after 3', parameters: { retry_after: 3 } }));
+    const p = s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'hi' });
+    await settle();
+    expect(s.tg.calls('sendMessage')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(3000);
+    await p;
+    expect(s.tg.calls('sendMessage')).toHaveLength(2);
+    await s.surface.stop();
+  });
+
+  it('sends nothing for an empty text with no file', async () => {
+    const s = await started();
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: '  \n ' });
+    expect(s.tg.calls('sendMessage')).toHaveLength(0);
+    expect(s.tg.calls('createForumTopic')).toHaveLength(0);
+    await s.surface.stop();
+  });
+});
+
+describe('approvals', () => {
+  async function shown(req = request()) {
+    const s = await started();
+    s.waiting.add(req.id);
+    await s.surface.showApproval(req, 'Ada · inbox-curator');
+    const msg = s.tg.calls('sendMessage').at(-1)!;
+    return { ...s, req, msg, messageId: 100 + s.tg.calls('sendMessage').length - 1 };
+  }
+
+  it('posts the rendered request with approve and reject buttons that fit in callback_data', async () => {
+    const { msg, req, surface } = await shown();
+    expect(msg.params.text).toBe(describeApproval(req, 'inbox-curator'));
+    expect(msg.params.message_thread_id).toBe(500);
+    const rows = keyboardOf(msg.params);
+    expect(rows).toEqual([
+      [
+        { text: 'Approve', callback_data: `a:${req.id}` },
+        { text: 'Reject', callback_data: `r:${req.id}` },
+      ],
+    ]);
+    await surface.stop();
+  });
+
+  it('uses a short key when the request id is too long for callback_data', async () => {
+    const id = `apr_${'z'.repeat(80)}`;
+    const s = await shown(request({ id }));
+    const rows = keyboardOf(s.msg.params);
+    for (const b of rows[0]!) expect(Buffer.byteLength(b.callback_data)).toBeLessThanOrEqual(64);
+    s.tg.push(pressUpdate(s.tg, rows[0]![0]!.callback_data, s.messageId));
+    await until(() => s.answers.length === 1, 'answer');
+    expect(s.answers).toEqual([[id, { kind: 'approved' }]]);
+    await s.surface.stop();
+  });
+
+  it('approve answers the request and the callback', async () => {
+    const s = await shown();
+    s.tg.push(pressUpdate(s.tg, `a:${s.req.id}`, s.messageId));
+    await until(() => s.tg.calls('answerCallbackQuery').length === 1, 'callback answer');
+    expect(s.answers).toEqual([[s.req.id, { kind: 'approved' }]]);
+    expect(s.tg.calls('answerCallbackQuery')[0]!.params.text).toBe('Approved.');
+    await s.surface.closeApproval(s.req.id, 'approved');
+    const edit = s.tg.calls('editMessageText')[0]!.params;
+    expect(edit).toMatchObject({ chat_id: USER, message_id: s.messageId, reply_markup: { inline_keyboard: [] } });
+    expect(String(edit.text)).toBe(`${describeApproval(s.req, 'inbox-curator')}\n\nOutcome: approved`);
+    await s.surface.stop();
+  });
+
+  it('reject asks for a reason; a reply is the reason and not a chat message', async () => {
+    const s = await shown();
+    s.tg.push(pressUpdate(s.tg, `r:${s.req.id}`, s.messageId));
+    await until(() => s.tg.calls('editMessageText').length === 1, 'edit');
+    const edit = s.tg.calls('editMessageText')[0]!.params;
+    expect(String(edit.text)).toMatch(/Reply to this message to give the reason/);
+    expect(keyboardOf(edit)).toEqual([[{ text: 'No reason', callback_data: `n:${s.req.id}` }]]);
+    expect(s.answers).toEqual([]);
+
+    s.tg.push(textUpdate(s.tg, 'Not this week.', { thread: 500, replyTo: s.messageId }));
+    await until(() => s.answers.length === 1, 'answer');
+    expect(s.answers).toEqual([[s.req.id, { kind: 'rejected', reason: 'Not this week.' }]]);
+    await settle();
+    expect(s.incoming).toEqual([]);
+
+    // The time limit no longer applies.
+    await vi.advanceTimersByTimeAsync(REASON_WAIT_MS);
+    expect(s.answers).toHaveLength(1);
+    await s.surface.stop();
+  });
+
+  it('a reply to a request that does not wait for a reason is a normal chat message', async () => {
+    const s = await shown();
+    s.tg.push(textUpdate(s.tg, 'what is this?', { thread: 500, replyTo: s.messageId }));
+    await until(() => s.incoming.length === 1, 'incoming');
+    expect(s.incoming[0]).toEqual({ surface: 'surface:telegram', text: 'what is this?', missionId: M1 });
+    expect(s.answers).toEqual([]);
+    await s.surface.stop();
+  });
+
+  it('"No reason" rejects without a reason', async () => {
+    const s = await shown();
+    s.tg.push(pressUpdate(s.tg, `r:${s.req.id}`, s.messageId));
+    await until(() => s.tg.calls('editMessageText').length === 1, 'edit');
+    s.tg.push(pressUpdate(s.tg, `n:${s.req.id}`, s.messageId));
+    await until(() => s.answers.length === 1, 'answer');
+    expect(s.answers).toEqual([[s.req.id, { kind: 'rejected' }]]);
+    await until(() => s.tg.calls('answerCallbackQuery').length === 2, 'callback answers');
+    expect(s.tg.calls('answerCallbackQuery')[1]!.params.text).toBe('Rejected.');
+    await vi.advanceTimersByTimeAsync(REASON_WAIT_MS);
+    expect(s.answers).toHaveLength(1);
+    await s.surface.stop();
+  });
+
+  it('rejects without a reason when nothing arrives within 5 minutes', async () => {
+    const s = await shown();
+    s.tg.push(pressUpdate(s.tg, `r:${s.req.id}`, s.messageId));
+    await until(() => s.tg.calls('editMessageText').length === 1, 'edit');
+    await vi.advanceTimersByTimeAsync(REASON_WAIT_MS - 1);
+    expect(s.answers).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.answers).toEqual([[s.req.id, { kind: 'rejected' }]]);
+    await s.surface.stop();
+  });
+
+  it('a press on a closed request says so and removes the buttons', async () => {
+    const s = await shown();
+    s.waiting.delete(s.req.id);
+    await s.surface.closeApproval(s.req.id, 'cancelled: no answer in 24 hours');
+    expect(String(s.tg.calls('editMessageText')[0]!.params.text)).toMatch(/Outcome: cancelled: no answer in 24 hours$/);
+    for (const data of [`a:${s.req.id}`, `r:${s.req.id}`, `n:${s.req.id}`]) {
+      s.tg.push(pressUpdate(s.tg, data, s.messageId));
+    }
+    await until(() => s.tg.calls('answerCallbackQuery').length === 3, 'callback answers');
+    for (const c of s.tg.calls('answerCallbackQuery')) {
+      expect(c.params.text).toBe('This request is no longer waiting for an answer.');
+    }
+    expect(s.answers).toEqual([]);
+    await until(() => s.tg.calls('editMessageReplyMarkup').length === 3, 'button removal');
+    expect(s.tg.calls('editMessageReplyMarkup')[0]!.params).toEqual({ chat_id: USER, message_id: s.messageId, reply_markup: { inline_keyboard: [] } });
+    await s.surface.stop();
+  });
+
+  it('closeApproval during the wait for a reason ends the wait', async () => {
+    const s = await shown();
+    s.tg.push(pressUpdate(s.tg, `r:${s.req.id}`, s.messageId));
+    await until(() => s.tg.calls('editMessageText').length === 1, 'edit');
+    s.waiting.delete(s.req.id);
+    await s.surface.closeApproval(s.req.id, 'cancelled: a new chat message arrived');
+    await vi.advanceTimersByTimeAsync(REASON_WAIT_MS);
+    expect(s.answers).toEqual([]);
+    // The reply now is a chat message again.
+    s.tg.push(textUpdate(s.tg, 'too late', { thread: 500, replyTo: s.messageId }));
+    await until(() => s.incoming.length === 1, 'incoming');
+    await s.surface.stop();
+  });
+
+  it('closeApproval for a request it never showed does nothing', async () => {
+    const s = await started();
+    await s.surface.closeApproval('apr_unknown', 'approved');
+    expect(s.tg.calls('editMessageText')).toHaveLength(0);
+    await s.surface.stop();
+  });
+
+  it('splits a long request and puts the buttons on the last part', async () => {
+    const req = request({ input: { body: 'x'.repeat(300) }, action: 'action:registry.create' });
+    req.input = { a: 'y '.repeat(3000) };
+    const s = await shown(req);
+    const sent = s.tg.calls('sendMessage');
+    expect(sent.length).toBeGreaterThan(1);
+    expect(sent.slice(0, -1).every((r) => r.params.reply_markup === undefined)).toBe(true);
+    expect(sent.map((r) => String(r.params.text)).join('')).toBe(describeApproval(req, 'inbox-curator'));
+    expect(keyboardOf(sent.at(-1)!.params)[0]).toHaveLength(2);
+    await s.surface.stop();
+  });
+});
+
+describe('offset across a restart', () => {
+  it('stores the offset after each handled update and resumes from it', async () => {
+    const store = createMemoryStore();
+    const tg = fakeTelegram();
+    tg.setNextUpdateId(70);
+    const first = await started({ tg, store });
+    tg.push(textUpdate(tg, 'one'), textUpdate(tg, 'two'));
+    await until(() => first.incoming.length === 2, 'incoming');
+    await until(() => tg.calls('getUpdates').length === 2, 'next poll');
+    expect(JSON.parse(store.getState(OFFSET_STATE_KEY)!).offset).toBe(72);
+    expect(tg.calls('getUpdates')[1]!.params.offset).toBe(72);
+    await first.surface.stop();
+
+    // The server sends update 71 again (it was not confirmed before the stop), then a new one.
+    tg.script('getUpdates', () => ({
+      ok: true,
+      result: [
+        { update_id: 71, message: { message_id: 1, date: 1, from: { id: USER }, chat: { id: USER, type: 'private' }, text: 'two' } },
+        { update_id: 72, message: { message_id: 2, date: 1, from: { id: USER }, chat: { id: USER, type: 'private' }, text: 'three' } },
+      ],
+    }));
+    const second = setup({ tg, store });
+    await second.surface.start(second.host);
+    await until(() => tg.calls('getUpdates').length >= 3, 'poll after the restart');
+    expect(tg.calls('getUpdates')[2]!.params.offset).toBe(72);
+    await until(() => second.incoming.length === 1, 'incoming');
+    await settle();
+    expect(second.incoming.map((m) => m.text)).toEqual(['three']);
+    await second.surface.stop();
+  });
+
+  it('does not send an offset saved more than 24 hours ago', async () => {
+    const store = createMemoryStore();
+    store.setState(OFFSET_STATE_KEY, JSON.stringify({ offset: 50, savedAt: Date.now() - 25 * 3_600_000 }));
+    const s = await started({ store });
+    expect(s.tg.calls('getUpdates')[0]!.params.offset).toBeUndefined();
+    await s.surface.stop();
+  });
+
+  it('does not mark an update as handled when the surface stops during it', async () => {
+    const store = createMemoryStore();
+    const tg = fakeTelegram();
+    tg.setNextUpdateId(10);
+    // The file download never answers, so the update is still in progress at the stop.
+    const hanging = tg.fetchFn;
+    const s = setup({
+      tg,
+      store,
+      over: {
+        fetchFn: (url, init) =>
+          String(url).includes('/file/bot')
+            ? new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))))
+            : hanging(url, init),
+      },
+    });
+    await s.surface.start(s.host);
+    tg.push(messageUpdate(tg, { document: { file_id: 'd1', file_name: 'a.txt', file_size: 1 } }));
+    await until(() => tg.calls('getFile').length === 1, 'getFile');
+    await settle();
+    await s.surface.stop();
+    expect(store.getState(OFFSET_STATE_KEY)).toBeUndefined();
+    expect(s.incoming).toEqual([]);
+  });
+});
