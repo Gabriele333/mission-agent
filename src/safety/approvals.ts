@@ -136,11 +136,13 @@ const MAX_INPUT_CHARS = 2000;
 /**
  * The text of a request for a surface. A shell command is shown in full. The input of a registry
  * action is shown in full too, because the user approves the whole manifest change (§4.2).
- * Any other input is shortened, and the text says so.
+ * Any other input is shortened, and the text says so. The harness's `details`, when set, come
+ * before the input.
  */
 export function describeApproval(req: ApprovalRequest, manifestName: string): string {
   const lines = [`Mission: ${manifestName}`, `Action: ${req.action}`];
   if (req.note !== undefined && req.note !== '') lines.push(`Note: ${req.note}`);
+  if (req.details !== undefined && req.details !== '') lines.push(req.details);
   if (req.toolName === SHELL_TOOL_NAME) {
     const command = typeof req.input.command === 'string' ? req.input.command : JSON.stringify(req.input.command);
     lines.push('Command:', command);

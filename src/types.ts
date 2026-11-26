@@ -224,6 +224,11 @@ export interface ApprovalRequest {
   createdAt: string;
   /** ISO time after which the harness cancels the request (§G). */
   expiresAt: string;
+  /**
+   * Text the harness adds before the request is shown, such as what a manifest edit changes
+   * or what a deletion removes (§4.2, §4.2.1). Not stored in the database.
+   */
+  details?: string;
 }
 
 export type ApprovalAnswer =
