@@ -127,6 +127,9 @@ export interface MissionRegistry {
   /** Scans `missions/` again. Raises `version` in a file whose content changed (§A.4). */
   reload(): void;
   onChange(listener: () => void): void;
+  /** Starts and stops watching `missions/` for changed files. */
+  watch(): void;
+  stopWatching(): void;
   /** The four operations of the mission admin (§4.2.1). Each one validates before it writes. */
   create(draft: ManifestDraft): Manifest;
   edit(id: MissionId, patch: Partial<ManifestDraft>): Manifest;
@@ -364,8 +367,13 @@ export interface Store {
   // event queues and the keys of events already seen (§B.2)
   /** Returns false and stores nothing when the key was already seen for this mission. */
   enqueueEvent(missionId: MissionId, event: TriggerEvent): boolean;
-  /** Removes and returns the waiting events of a mission, oldest first. */
-  takeEvents(missionId: MissionId): QueuedEvent[];
+  /**
+   * Removes and returns the waiting events of a mission, oldest first.
+   * With a trigger id, it takes only the events of that trigger and leaves the others (§B.2).
+   */
+  takeEvents(missionId: MissionId, triggerId?: string): QueuedEvent[];
+  /** Returns the waiting events of a mission, oldest first, and removes nothing. */
+  peekEvents(missionId: MissionId): QueuedEvent[];
   missionsWithEvents(): MissionId[];
   deleteEvents(missionId: MissionId): void;
 
