@@ -432,6 +432,13 @@ export interface IncomingMessage {
   missionId?: MissionId;
   /** Paths of files that the user sent, already saved by the surface in a temporary place. */
   files?: string[];
+  /**
+   * Saves the files of the message in the data folder of the mission that takes it, and returns
+   * their paths. The harness calls it only after it has decided which mission takes the message,
+   * so a message that is refused (paused agent, frozen mission) saves nothing. Undefined means
+   * the files could not be saved and the surface has already told the user.
+   */
+  saveFiles?: (missionId: MissionId) => Promise<string[] | undefined>;
 }
 
 export interface OutgoingMessage {

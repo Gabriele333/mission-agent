@@ -375,3 +375,81 @@ it('a new store has no pause', () => {
   r.dispatcher.close();
   r.cleanUp();
 });
+
+describe('files from the user are saved only for an accepted message (§F.1)', () => {
+  function withFiles(missionId?: string) {
+    const calls: string[] = [];
+    const msg = {
+      surface: TELEGRAM,
+      text: 'see the file',
+      ...(missionId !== undefined ? { missionId } : {}),
+      saveFiles: async (target: string) => {
+        calls.push(target);
+        return [join(rig.paths.dataDir(target), 'doc.pdf')];
+      },
+    };
+    return { msg, calls };
+  }
+
+  it('saves nothing while the agent is paused', async () => {
+    const news = rig.create({ name: 'news' });
+    await chat('/pause');
+    const { msg, calls } = withFiles(news);
+    await rig.dispatcher.incoming(msg);
+    await rig.dispatcher.idle();
+    expect(calls).toEqual([]);
+    expect(rig.telegram.texts().at(-1)).toContain('The agent is paused, so this message was not passed on.');
+    expect(rig.engine.requests).toEqual([]);
+  });
+
+  it('saves nothing for a frozen mission, a mission without trigger:chat or a deleted mission', async () => {
+    const frozen = rig.create({ name: 'news' });
+    rig.registry.setStatus(frozen, 'frozen');
+    const timer = rig.create({ name: 'timer-only', triggers: [{ use: 'trigger:cron', at: '0 7 * * *' }] });
+    for (const id of [frozen, timer, 'm_aaaaaaaaaaaa']) {
+      const { msg, calls } = withFiles(id);
+      await rig.dispatcher.incoming(msg);
+      expect(calls).toEqual([]);
+    }
+    await rig.dispatcher.idle();
+    expect(rig.telegram.texts()).toEqual([
+      'The mission news is frozen, so it takes no messages.',
+      'The mission timer-only takes no chat messages: its manifest does not list trigger:chat.',
+      'The mission of this thread no longer exists. Write in the general thread instead.',
+    ]);
+    expect(rig.engine.requests).toEqual([]);
+  });
+
+  it('saves the files in the folder of the mission that takes the message, also after triage', async () => {
+    const news = rig.create({ name: 'news' });
+    const thread = withFiles(news);
+    await rig.dispatcher.incoming(thread.msg);
+    rig.classify = () => ({ missionId: news, confidence: 0.95 });
+    const general = withFiles();
+    await rig.dispatcher.incoming(general.msg);
+    await rig.dispatcher.idle();
+    expect(thread.calls).toEqual([news]);
+    expect(general.calls).toEqual([news]);
+    const texts = rig.engine.requests.map((r) => (r.input.kind === 'chat' ? r.input.text : ''));
+    expect(texts).toEqual([
+      'see the file\n\nFiles the user sent, saved in your folder:\n- data/doc.pdf',
+      'see the file\n\nFiles the user sent, saved in your folder:\n- data/doc.pdf',
+    ]);
+  });
+
+  it('passes nothing on when the surface could not save the file', async () => {
+    const news = rig.create({ name: 'news' });
+    await rig.dispatcher.incoming({ surface: TELEGRAM, text: 'x', missionId: news, saveFiles: async () => undefined });
+    await rig.dispatcher.incoming({
+      surface: TELEGRAM,
+      text: 'y',
+      missionId: news,
+      saveFiles: async () => {
+        throw new Error('disk full');
+      },
+    });
+    await rig.dispatcher.idle();
+    expect(rig.engine.requests).toEqual([]);
+    expect(rig.telegram.texts()).toEqual(['The file could not be saved, so the message was not passed on. Please send it again.']);
+  });
+});

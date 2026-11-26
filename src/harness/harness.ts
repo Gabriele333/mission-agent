@@ -5,7 +5,14 @@ import { createConfigHolder, defaultConfig, initRootFolder } from '../config/ind
 import { openStore } from '../db/index.js';
 import { createMissionRegistry, MISSION_ADMIN_MANIFEST, type WatchingMissionRegistry } from '../manifest/index.js';
 import { pathsFor, type Paths } from '../paths.js';
-import { checkModelLogin, createModelCaller, createRunEngine, type ModelLoginDeps, type QueryFn } from '../run/index.js';
+import {
+  checkModelLogin,
+  createModelCaller,
+  createRunEngine,
+  type LoginCheck,
+  type ModelLoginDeps,
+  type QueryFn,
+} from '../run/index.js';
 import { clearStaleApprovals, createApprovalQueue, createGate } from '../safety/index.js';
 import {
   assertCredentialId,
@@ -17,15 +24,26 @@ import {
 } from '../secrets/index.js';
 import { createLocalServer, isServerAlive, readServerFile, type LocalServer } from '../server/index.js';
 import {
+  checkBot,
   createTelegramSurface,
+  pairTelegramUser,
   TELEGRAM_SURFACE_ID,
   TelegramError,
+  type BotCheck,
+  type FetchFn,
   type TelegramSurfaceOptions,
 } from '../surfaces/telegram/index.js';
 import { createTerminalSurface, TERMINAL_SURFACE_ID, type TerminalSurface } from '../surfaces/terminal/index.js';
 import { builtinTools, createCodeCatalog, createToolCatalog } from '../tools/index.js';
 import { createTriage } from '../triage/index.js';
-import { chatTrigger, createScheduler, createTriggerCatalog, cronTrigger, type Scheduler } from '../triggers/index.js';
+import {
+  chatTrigger,
+  createScheduler,
+  createTriggerCatalog,
+  cronTrigger,
+  type Scheduler,
+  type TriggerCatalog,
+} from '../triggers/index.js';
 import {
   SYS_GENERAL,
   type ApprovalQueue,
@@ -87,6 +105,19 @@ export interface HarnessOptions {
   configDebounceMs?: number;
   /** The time zone of the date in a run's input. Defaults to the machine's. */
   timeZone?: string;
+  /** Replaces `fetch` for the bot check and the pairing of the setup page. For tests. */
+  telegramFetch?: FetchFn;
+}
+
+/** A timer run that was missed while the harness was stopped (§B.2), as the scheduler reported it at the start. */
+export interface MissedTimerRun {
+  missionId: MissionId;
+  expression: string;
+  /** ISO time of the last missed run. */
+  dueAt: string;
+  count: number;
+  /** True when there were more missed runs than `count`. */
+  countIsMinimum: boolean;
 }
 
 export interface HarnessStatus {
@@ -125,9 +156,39 @@ export interface Harness {
   /** Resolves when the mission changes seen so far are handled and no run is in progress. */
   settle(): Promise<void>;
   /** The setup page stops the Telegram surface while it pairs the user's account (§5.1). */
-  telegram: { stop(): Promise<void>; start(): Promise<void>; running(): boolean };
+  telegram: {
+    stop(): Promise<void>;
+    start(): Promise<void>;
+    running(): boolean;
+    /** Asks Telegram about the bot with the stored token (§5.1 step 3). */
+    check(): Promise<BotCheck>;
+    /**
+     * Waits for a private message with the code and returns its sender. The surface must be
+     * stopped first. The signal, or `stop()` of the harness, ends the wait.
+     */
+    pair(options: { code: string; timeoutMs: number; signal?: AbortSignal }): Promise<number>;
+  };
   config(): LoadedConfig | undefined;
   configError(): string | undefined;
+
+  // What the two local pages need (§J). Each of these was added for the pages.
+
+  /** Reads the configuration files now, after the setup page wrote one, and applies them as a change of agent.yaml does. */
+  reloadConfig(): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Writes through the secret store and reads the value again (§A.5). A value is never returned. */
+  secrets: {
+    has(id: string): Promise<boolean>;
+    set(id: string, value: string): Promise<void>;
+    delete(id: string): Promise<boolean>;
+  };
+  /** Checks the model login without a model call, and ends the pause when the login was what kept it (§5.1). */
+  checkLogin(): Promise<LoginCheck>;
+  /** The tools and triggers of the harness (§A.5, §B.2). */
+  catalogs: { tools: ToolCatalog; triggers: TriggerCatalog };
+  /** The timer runs that were missed while the harness was stopped, reported at this start. */
+  missedTimerRuns(): MissedTimerRun[];
+  /** Replaces any stored secret value found in a text with the credential's id. */
+  redact(text: string): string;
 }
 
 /** Another harness answers on the local server of the same root folder. */
@@ -194,6 +255,14 @@ export function createHarness(options: HarnessOptions): Harness {
   const secretStore = options.secretStore ?? createKeychainStore();
   const cache = createSecretCache(secretStore);
   const redactor = createRedactor(() => cache.valuesForRedaction());
+  /** The redacted text. If the redactor fails, nothing of the text is kept. */
+  function safeRedact(text: string): string {
+    try {
+      return redactor.redact(text);
+    } catch {
+      return '[text removed: the redactor failed]';
+    }
+  }
 
   // ------------------------------------------------------------ catalogs and registry, in this order
 
@@ -264,6 +333,9 @@ export function createHarness(options: HarnessOptions): Harness {
     store,
     config: cfg,
     now,
+    // The request that is saved, shown and listed holds no secret value (§A.5).
+    // The engine keeps the original input for the tool call.
+    redact: safeRedact,
     async show(req) {
       // Approval requests go to the default surface (§F.1).
       const surface = surfaces.defaultSurface();
@@ -281,7 +353,9 @@ export function createHarness(options: HarnessOptions): Harness {
         log(`The details of an approval request could not be built: ${errorText(err)}`);
       }
       shownOn.set(req.id, surface.id);
-      await surface.showApproval(details === undefined ? req : { ...req, details }, label(req.missionId));
+      // The details quote the input, so they pass through the redactor too.
+      const shown = details === undefined ? req : { ...req, details: safeRedact(details) };
+      await surface.showApproval(shown, label(req.missionId));
     },
     async close(id, outcome) {
       const surfaceId = shownOn.get(id);
@@ -348,7 +422,8 @@ export function createHarness(options: HarnessOptions): Harness {
     if (!holder.exists()) {
       return (
         `agent.yaml does not exist in ${paths.root}, so the agent has no name yet. ` +
-        `Create it with: mission-agent init --root "${paths.root}" --name <agent name>`
+        `Set it up in the setup page (mission-agent setup --root "${paths.root}"), ` +
+        `or create the file with: mission-agent init --root "${paths.root}" --name <agent name>`
       );
     }
     return configError ?? 'agent.yaml is invalid.';
@@ -631,11 +706,19 @@ export function createHarness(options: HarnessOptions): Harness {
     }).join('\u0000');
   }
 
+  // A check from the watcher and one from the setup page run one after the other.
+  let configChain: Promise<void> = Promise.resolve();
+  function queueConfigCheck(): Promise<void> {
+    const run = configChain.then(onConfigChanged);
+    configChain = run.catch((err: unknown) => log(`The new configuration was not fully applied: ${errorText(err)}`));
+    return configChain;
+  }
+
   function scheduleConfigCheck(): void {
     if (configTimer !== undefined) clearTimeout(configTimer);
     configTimer = setTimeout(() => {
       configTimer = undefined;
-      void onConfigChanged().catch((err: unknown) => log(`The new configuration was not fully applied: ${errorText(err)}`));
+      void queueConfigCheck();
     }, options.configDebounceMs ?? 300);
   }
 
@@ -690,6 +773,20 @@ export function createHarness(options: HarnessOptions): Harness {
   let aliveTimer: ReturnType<typeof setInterval> | undefined;
   let running = false;
   let startedAt: string | undefined;
+  let missed: MissedTimerRun[] = [];
+
+  /** Keeps the missed timer runs that the scheduler reports at the start, for the dashboard. */
+  function noteMissed(missionId: MissionId, event: TriggerEvent): void {
+    const d = event.data;
+    if (event.triggerId !== cronTrigger.id || d.missed !== true) return;
+    missed.push({
+      missionId,
+      expression: String(d.expression ?? ''),
+      dueAt: String(d.scheduledAt ?? event.time),
+      count: typeof d.missedCount === 'number' ? d.missedCount : 1,
+      countIsMinimum: d.missedCountIsMinimum === true,
+    });
+  }
 
   function status(): HarnessStatus {
     const rec = dispatcher.pauseRecord();
@@ -732,6 +829,7 @@ export function createHarness(options: HarnessOptions): Harness {
   }
 
   async function startInner(startRecord: ReturnType<typeof recordStart>): Promise<void> {
+    missed = [];
     configSeen = configFingerprint();
     readConfig();
     registry.reload();
@@ -826,7 +924,10 @@ export function createHarness(options: HarnessOptions): Harness {
       registry,
       credentials: (ids) => cache.pick(ids),
       ...(startRecord.lastStoppedAt !== undefined ? { lastStoppedAt: startRecord.lastStoppedAt } : {}),
-      onEvent: (missionId, event) => dispatcher.onEvent(missionId, event),
+      onEvent: (missionId, event) => {
+        noteMissed(missionId, event);
+        dispatcher.onEvent(missionId, event);
+      },
       onError: (triggerId, err) => log(`Trigger ${triggerId}: ${err.message}`),
     });
     await scheduler.start();
@@ -854,6 +955,7 @@ export function createHarness(options: HarnessOptions): Harness {
     // A harness whose start failed still holds the database open.
     if (!running) return closeStore();
     running = false;
+    pairAbort?.abort();
     if (aliveTimer !== undefined) clearInterval(aliveTimer);
     if (configTimer !== undefined) clearTimeout(configTimer);
     configWatcher?.close();
@@ -875,6 +977,59 @@ export function createHarness(options: HarnessOptions): Harness {
     await server.stop();
     recordCleanStop(store, now());
     closeStore();
+  }
+
+  // ------------------------------------------------------------ what the local pages need (§J)
+
+  let pairAbort: AbortController | undefined;
+
+  async function currentBotToken(): Promise<string | undefined> {
+    await cache.refresh(TELEGRAM_BOT_TOKEN);
+    return cache.get(TELEGRAM_BOT_TOKEN);
+  }
+
+  const noBotToken = `No bot token is stored. Enter the token of ${TELEGRAM_BOT_TOKEN} first.`;
+
+  async function checkTelegramBot(): Promise<BotCheck> {
+    const token = await currentBotToken();
+    if (token === undefined) return { ok: false, reason: noBotToken };
+    return checkBot(token, options.telegramFetch);
+  }
+
+  async function pairTelegram(opts: { code: string; timeoutMs: number; signal?: AbortSignal }): Promise<number> {
+    if (telegram !== undefined) throw new Error('The Telegram surface is running. Stop it before the pairing.');
+    if (pairAbort !== undefined) throw new Error('A pairing is already in progress.');
+    if (!running) throw new Error('The harness is not running.');
+    const token = await currentBotToken();
+    if (token === undefined) throw new Error(noBotToken);
+    const abort = new AbortController();
+    pairAbort = abort;
+    try {
+      return await pairTelegramUser({
+        token,
+        code: opts.code,
+        timeoutMs: opts.timeoutMs,
+        signal: opts.signal === undefined ? abort.signal : AbortSignal.any([abort.signal, opts.signal]),
+        ...(options.telegramFetch !== undefined ? { fetchFn: options.telegramFetch } : {}),
+      });
+    } finally {
+      if (pairAbort === abort) pairAbort = undefined;
+    }
+  }
+
+  async function reloadConfigNow(): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (running) await queueConfigCheck();
+    else readConfig();
+    if (loaded !== undefined && configError === undefined) return { ok: true };
+    return { ok: false, error: configError ?? configBlockerText() };
+  }
+
+  async function checkLoginNow(): Promise<LoginCheck> {
+    await loadSecrets();
+    const check = await checkModelLogin(loginDeps);
+    const blocker = dispatcher.pauseRecord().blocker;
+    if (check.ok && running && blocker !== undefined && blocker.kind !== 'config') await reevaluateBlocker();
+    return check;
   }
 
   return {
@@ -910,8 +1065,32 @@ export function createHarness(options: HarnessOptions): Harness {
         await startTelegram();
       },
       running: () => telegram !== undefined,
+      check: checkTelegramBot,
+      pair: pairTelegram,
     },
     config: () => loaded,
     configError: () => configError,
+    reloadConfig: reloadConfigNow,
+    secrets: {
+      async has(id) {
+        assertCredentialId(id);
+        return secretStore.has(id);
+      },
+      async set(id, value) {
+        assertCredentialId(id);
+        await secretStore.set(id, value);
+        await refreshSecret(id);
+      },
+      async delete(id) {
+        assertCredentialId(id);
+        const deleted = await secretStore.delete(id);
+        await refreshSecret(id);
+        return deleted;
+      },
+    },
+    checkLogin: checkLoginNow,
+    catalogs: { tools: toolCatalog, triggers: triggerCatalog },
+    missedTimerRuns: () => [...missed],
+    redact: (text) => redactor.redact(text),
   };
 }

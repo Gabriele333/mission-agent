@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -185,6 +185,13 @@ describe('start', () => {
     const pending = run(['start', '--root', root], { waitForSignal: () => signal });
     await new Promise((r) => setTimeout(r, 200));
     expect(existsSync(join(root, 'state', 'server'))).toBe(true);
+    // The harness that start runs serves the two pages.
+    const info = JSON.parse(readFileSync(join(root, 'state', 'server'), 'utf8')) as { port: number; token: string };
+    for (const path of ['/setup', '/dashboard']) {
+      const page = await fetch(`http://127.0.0.1:${info.port}${path}`, { headers: { authorization: `Bearer ${info.token}` } });
+      expect(page.status).toBe(200);
+      expect(page.headers.get('content-security-policy')).toContain("script-src 'self'");
+    }
     release('SIGINT');
     const r = await pending;
     expect(r.code).toBe(0);
@@ -212,17 +219,117 @@ describe('other commands', () => {
     expect(r.out).toContain(`mission-agent secret set ${MODEL_API_KEY}`);
   });
 
-  it('setup and dashboard say they are not part of this version', async () => {
-    for (const cmd of ['setup', 'dashboard']) {
-      const r = await run([cmd, '--root', root]);
-      expect(r.code).toBe(1);
-      expect(r.out).toContain('not part of this version yet');
-    }
-  });
-
   it('chat says that the harness is not running', async () => {
     const r = await run(['chat', '--root', root]);
     expect(r.code).toBe(1);
     expect(r.out).toContain('The harness is not running.');
+  });
+});
+
+describe('setup and dashboard', () => {
+  it('say that the harness is not running, and tell the user to start it', async () => {
+    for (const cmd of ['setup', 'dashboard']) {
+      const opened: string[] = [];
+      const r = await run([cmd, '--root', root], { openUrl: async (u) => void opened.push(u) });
+      expect(r.code).toBe(1);
+      expect(r.out).toContain(`The harness is not running for ${root}`);
+      expect(r.out).toContain(`mission-agent start --root "${root}"`);
+      expect(opened).toEqual([]);
+    }
+  });
+
+  it('open the page of the running harness with the token, or print the address with --no-open', async () => {
+    const h = makeHarness({ root });
+    await h.start();
+    const info = JSON.parse(readFileSync(join(root, 'state', 'server'), 'utf8')) as { port: number; token: string };
+    for (const [cmd, path] of [
+      ['setup', '/setup'],
+      ['dashboard', '/dashboard'],
+    ] as const) {
+      const opened: string[] = [];
+      const r = await run([cmd, '--root', root], { openUrl: async (u) => void opened.push(u) });
+      expect(r.code).toBe(0);
+      expect(opened).toEqual([`http://127.0.0.1:${info.port}${path}?token=${info.token}`]);
+      expect(r.out).not.toContain(info.token);
+      const printed = await run([cmd, '--no-open', '--root', root], {
+        openUrl: async () => {
+          throw new Error('must not open');
+        },
+      });
+      expect(printed.code).toBe(0);
+      expect(printed.out).toContain(`http://127.0.0.1:${info.port}${path}?token=${info.token}`);
+    }
+    const wrong = await run(['status', '--no-open', '--root', root]);
+    expect(wrong.code).toBe(2);
+  });
+});
+
+describe('service', () => {
+  function fakeService(calls: string[][], extra: Partial<NonNullable<CliIo['serviceOptions']>> = {}): NonNullable<CliIo['serviceOptions']> {
+    const cli = join(tmp, 'dist', 'cli.js');
+    mkdirSync(join(tmp, 'dist'), { recursive: true });
+    writeFileSync(cli, '// built\n');
+    return {
+      cliPath: cli,
+      uid: 501,
+      envPath: '/usr/bin:/bin',
+      launchAgentsDir: join(tmp, 'LaunchAgents'),
+      launchctl: async (args) => {
+        calls.push(args);
+        return args[0] === 'print' ? { code: 113, stdout: '', stderr: 'Could not find service' } : { code: 0, stdout: '', stderr: '' };
+      },
+      ...extra,
+    };
+  }
+
+  it('needs --root, because the root folder is never assumed', async () => {
+    for (const sub of ['install', 'uninstall', 'status']) {
+      const calls: string[][] = [];
+      const r = await run(['service', sub], { serviceOptions: fakeService(calls) });
+      expect(r.code).toBe(2);
+      expect(r.err).toContain(`service ${sub} needs the agent's root folder`);
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it('install prints what it writes before it writes it, then loads it', async () => {
+    const calls: string[][] = [];
+    const options = fakeService(calls);
+    const r = await run(['service', 'install', '--root', root], { serviceOptions: options });
+    expect(r.code).toBe(0);
+    const plist = readdirSync(join(tmp, 'LaunchAgents'))[0] ?? '';
+    const plistPath = join(tmp, 'LaunchAgents', plist);
+    expect(r.out).toContain(`The service for the root folder ${root}:`);
+    expect(r.out).toContain(`File:     ${plistPath}`);
+    expect(r.out.indexOf('File:')).toBeLessThan(r.out.indexOf('The service is installed and loaded.'));
+    expect(calls).toEqual([
+      ['print', `gui/501/${plist.replace(/\.plist$/, '')}`],
+      ['bootstrap', 'gui/501', plistPath],
+    ]);
+    expect(readFileSync(plistPath, 'utf8')).toContain(`<string>${root}</string>`);
+
+    const status = await run(['service', 'status', '--root', root], { serviceOptions: options });
+    expect(status.out).toContain('(present)');
+    expect(status.out).toContain('launchd:  not loaded');
+
+    const removed = await run(['service', 'uninstall', '--root', root], { serviceOptions: options });
+    expect(removed.code).toBe(0);
+    expect(removed.out).toContain('The service is removed.');
+    expect(existsSync(plistPath)).toBe(false);
+  });
+
+  it('install refuses while a harness for the root runs in the foreground, and when cli.js is missing', async () => {
+    const h = makeHarness({ root });
+    await h.start();
+    const calls: string[][] = [];
+    const r = await run(['service', 'install', '--root', root], { serviceOptions: fakeService(calls) });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(`A harness for ${root} runs in the foreground (process ${process.pid}). Stop it first`);
+    expect(calls.some((c) => c[0] === 'bootstrap')).toBe(false);
+    await h.stop();
+
+    const missing = await run(['service', 'install', '--root', root], { serviceOptions: fakeService([], { cliPath: join(tmp, 'nope', 'cli.js') }) });
+    expect(missing.code).toBe(1);
+    expect(missing.err).toContain('cannot be found. Build it first with: npm run build');
   });
 });

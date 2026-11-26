@@ -1,9 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStore } from '../db/index.js';
 import { pathsFor } from '../paths.js';
+import type { QueryFn } from '../run/index.js';
+import { fakeQuery, initMsg, resultMsg } from '../run/test-helpers.js';
 import { createMemorySecretStore, MODEL_API_KEY, TELEGRAM_BOT_TOKEN } from '../secrets/index.js';
 import { readServerFile } from '../server/index.js';
 import { collectEvents, waitFor, type EventCollector } from '../server/test-helpers.js';
@@ -328,5 +331,71 @@ describe('agent.yaml (§H, §5.1)', () => {
     agentYaml();
     await waitFor(() => !h.status().paused, 'the end of the pause', 5000);
     expect(h.status().agentName).toBe('Ada');
+  });
+});
+
+describe('approvals hold no secret value (§A.5, §G)', () => {
+  it('redacts the shown text, the stored row and the pending list, and the approved call keeps the original input', async () => {
+    writeFileSync(join(root, 'agent.yaml'), 'agent_name: Ada\nmodel_login: api_key\ndefault_surface: terminal\n');
+    const KEY = 'sk-ant-api03-review-secret-value-1234567890';
+    const command = `curl -H "x-api-key: ${KEY}" https://api.example.com/v1/x`;
+    const plain = scriptedQuery(simpleAnswers(), { apiKeySource: 'ANTHROPIC_API_KEY' } as never);
+    let permission: PermissionResult | undefined;
+    const run = fakeQuery([
+      async function* (ctx) {
+        yield initMsg('s1');
+        permission = (await ctx.useTool('Bash', { command }, 'toolu_secret')).permission;
+        yield resultMsg({ result: 'ok', sessionId: 's1' });
+      },
+    ]);
+    const queryFn: QueryFn = (p) => (Array.isArray(p.options.tools) && p.options.tools.length === 0 ? plain.queryFn(p) : run.queryFn(p));
+    const h = createHarness({ root, secretStore: createMemorySecretStore({ [MODEL_API_KEY]: KEY }), queryFn, log: (t) => logs.push(t), stopWaitMs: 2000 });
+    started.push(h);
+    await h.start();
+    const m = h.registry.create({
+      name: 'shell-user',
+      description: 'Uses the shell',
+      triggers: [{ use: 'trigger:chat' }],
+      tools: ['tool:shell'],
+      context: { instructions: 'Test.' },
+      signals: [],
+      gates: [],
+    });
+    await h.settle();
+    const stream = await chatStream(h);
+    await post(h, '/api/chat/message', { text: `/mission ${m.name}` });
+    await waitFor(() => textsOf(stream).some((t) => t.includes('current mission is now')), 'the switch');
+    await post(h, '/api/chat/message', { text: 'call the api' });
+    await waitFor(() => stream.events.some((e) => e.event === 'approval'), 'the approval request');
+
+    const approval = stream.events.find((e) => e.event === 'approval')?.data as { id: string; text: string };
+    expect(approval.text).toContain(`[${MODEL_API_KEY}]`);
+    expect(JSON.stringify(stream.events)).not.toContain(KEY);
+    expect(JSON.stringify(h.store.listApprovals())).not.toContain(KEY);
+    expect(h.store.listApprovals()).toHaveLength(1);
+    expect(JSON.stringify(h.approvals.pending())).not.toContain(KEY);
+    expect(h.approvals.pending()[0]?.input.command).toBe(`curl -H "x-api-key: [${MODEL_API_KEY}]" https://api.example.com/v1/x`);
+
+    const res = await post(h, `/api/chat/approvals/${approval.id}`, { decision: 'approve' });
+    expect(res.status).toBe(200);
+    await waitFor(() => permission !== undefined, 'the answer');
+    expect(permission).toEqual({ behavior: 'allow', updatedInput: { command } });
+    await h.settle();
+  });
+});
+
+describe('an invalid manifest stops only its own mission (§A.4, §H)', () => {
+  it('starts and runs the other missions when one manifest has too many YAML aliases', async () => {
+    agentYaml();
+    const id = 'm_aaaaaaaaaaaa';
+    mkdirSync(join(root, 'missions', id), { recursive: true });
+    writeFileSync(join(root, 'missions', id, 'manifest.yaml'), `id: ${id}\nx: &a hi\ny: [${Array.from({ length: 150 }, () => '*a').join(', ')}]\n`);
+    const h = make();
+    await h.start();
+    expect(h.status().paused).toBe(false);
+    expect(h.registry.get(SYS_GENERAL)).toBeDefined();
+    expect(h.registry.errors().map((e) => e.message)).toContain(
+      'The file could not be read as a manifest: Excessive alias count indicates a resource exhaustion attack',
+    );
   });
 });

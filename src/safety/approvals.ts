@@ -16,6 +16,12 @@ export interface ApprovalQueueOptions {
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
   newId?: () => string;
+  /**
+   * Removes secret values from a text (§A.5). The queue applies it to the note and to every text
+   * in the input before the request is saved, shown or listed. The caller keeps the original
+   * input for the tool call itself.
+   */
+  redact?: (text: string) => string;
 }
 
 interface Waiting {
@@ -34,6 +40,15 @@ export function createApprovalQueue(options: ApprovalQueueOptions): ApprovalQueu
   const clearTimer = options.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
   const newId = options.newId ?? (() => `apr_${randomBytes(8).toString('hex')}`);
   const waiting = new Map<string, Waiting>();
+  const redactText = (text: string): string => {
+    if (options.redact === undefined) return text;
+    try {
+      return options.redact(text);
+    } catch {
+      // Showing the text unredacted could leak a secret, so nothing of it is shown.
+      return '[text removed: the redactor failed]';
+    }
+  };
 
   function finish(id: string, answer: ApprovalAnswer): boolean {
     const entry = waiting.get(id);
@@ -75,11 +90,11 @@ export function createApprovalQueue(options: ApprovalQueueOptions): ApprovalQueu
       missionId: input.missionId,
       action: input.action,
       toolName: input.toolName,
-      input: input.input,
+      input: redactValue(input.input, redactText) as Record<string, unknown>,
       createdAt: created.toISOString(),
       expiresAt: new Date(created.getTime() + waitMs).toISOString(),
     };
-    if (input.note !== undefined) req.note = input.note;
+    if (input.note !== undefined) req.note = redactText(input.note);
 
     return new Promise<ApprovalAnswer>((resolve) => {
       waiting.set(req.id, { req, resolve });
@@ -130,6 +145,16 @@ export function clearStaleApprovals(store: Pick<Store, 'listApprovals' | 'delete
   return stale;
 }
 
+/** A copy of the value with every text in it, keys included, passed through `redact`. */
+function redactValue(value: unknown, redact: (text: string) => string): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map((v) => redactValue(v, redact));
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [redact(k), redactValue(v, redact)]));
+  }
+  return value;
+}
+
 const MAX_VALUE_CHARS = 500;
 const MAX_INPUT_CHARS = 2000;
 
@@ -137,20 +162,78 @@ const MAX_INPUT_CHARS = 2000;
  * The text of a request for a surface. A shell command is shown in full. The input of a registry
  * action is shown in full too, because the user approves the whole manifest change (§4.2).
  * Any other input is shortened, and the text says so. The harness's `details`, when set, come
- * before the input.
+ * before the input. No hidden or control character reaches the surface as it is: each one is
+ * shown as `<U+XXXX>` (see `visibleLine`).
  */
 export function describeApproval(req: ApprovalRequest, manifestName: string): string {
-  const lines = [`Mission: ${manifestName}`, `Action: ${req.action}`];
-  if (req.note !== undefined && req.note !== '') lines.push(`Note: ${req.note}`);
-  if (req.details !== undefined && req.details !== '') lines.push(req.details);
-  if (req.toolName === SHELL_TOOL_NAME) {
-    const command = typeof req.input.command === 'string' ? req.input.command : JSON.stringify(req.input.command);
-    lines.push('Command:', command);
+  const lines = [`Mission: ${visibleLine(manifestName)}`, `Action: ${visibleLine(req.action)}`];
+  const isShell = req.toolName === SHELL_TOOL_NAME;
+  const command = typeof req.input.command === 'string' ? req.input.command : (JSON.stringify(req.input.command) ?? '');
+  // For a shell call the gate sets the note to the command. The command block below shows it once.
+  const note = req.note !== undefined && req.note !== '' && !(isShell && req.note === command) ? req.note : undefined;
+  if (note !== undefined) lines.push(`Note: ${visibleLine(note)}`);
+  // The details are the harness's own text and use line breaks for layout.
+  if (req.details !== undefined && req.details !== '') lines.push(visibleText(req.details));
+  if (isShell) {
+    lines.push(...commandBlock(command));
     return lines.join('\n');
   }
   const full = (REGISTRY_ACTIONS as readonly string[]).includes(req.action);
-  lines.push('Input:', full ? JSON.stringify(req.input, null, 2) : shortInput(req.input));
+  // JSON writes a line break inside a value as \n, so the line breaks left in the text are layout.
+  lines.push('Input:', visibleText(full ? JSON.stringify(req.input, null, 2) : shortInput(req.input)));
   return lines.join('\n');
+}
+
+/** The mark at the start of each line of a shell command in an approval request. */
+export const COMMAND_LINE_PREFIX = '| ';
+
+/**
+ * The command as a block in which every line starts with `| `, so no line of the command can look
+ * like a line of the request itself. Hidden and control characters are shown as `<U+XXXX>`.
+ */
+function commandBlock(command: string): string[] {
+  const commandLines = command.split('\n').map((l) => `${COMMAND_LINE_PREFIX}${visibleLine(l)}`);
+  const count = commandLines.length === 1 ? '1 line' : `${commandLines.length} lines`;
+  const head = `Command (${count}, each line starts with "${COMMAND_LINE_PREFIX.trim()}"):`;
+  const hidden = countHidden(command.replaceAll('\n', ''));
+  const warning =
+    hidden === 0
+      ? []
+      : [`Warning: the command contains ${hidden} hidden or control ${hidden === 1 ? 'character' : 'characters'}, shown as <U+XXXX>.`];
+  return [...warning, head, ...commandLines];
+}
+
+/**
+ * Characters that a terminal or a chat app does not show as they are: C0 and C1 control characters
+ * (an ANSI escape sequence starts with one), characters that reorder text (bidirectional marks,
+ * embeddings, overrides and isolates), characters with no width, the Unicode line and paragraph
+ * separators, and the invisible tag characters.
+ */
+const HIDDEN =
+  /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}]/gu;
+
+function escapeChar(ch: string): string {
+  return `<U+${(ch.codePointAt(0) as number).toString(16).toUpperCase().padStart(4, '0')}>`;
+}
+
+/**
+ * One line with every hidden character shown as `<U+XXXX>`, a line break included. A `<U+` that is
+ * already in the text is written as `<U+003C>U+`, so the user can tell it from an escaped character.
+ */
+export function visibleLine(text: string): string {
+  return text.replaceAll('<U+', '<U+003C>U+').replace(HIDDEN, escapeChar);
+}
+
+/** Like `visibleLine`, but a line break stays a line break. */
+function visibleText(text: string): string {
+  return text
+    .split('\n')
+    .map((l) => visibleLine(l))
+    .join('\n');
+}
+
+function countHidden(text: string): number {
+  return text.match(HIDDEN)?.length ?? 0;
 }
 
 function shortInput(input: Record<string, unknown>): string {

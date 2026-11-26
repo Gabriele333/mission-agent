@@ -31,6 +31,16 @@ function problemsOf(fn: () => unknown): string[] {
 }
 
 describe('loadConfig', () => {
+  it('reports a file with too many YAML aliases as a ConfigError, and the holder keeps the last valid values', () => {
+    writeYaml('agent_name: Ada\n');
+    const holder = createConfigHolder(paths);
+    expect(holder.current().config.agentName).toBe('Ada');
+    writeYaml(`agent_name: &a Bob\nx: [${Array.from({ length: 150 }, () => '*a').join(', ')}]\n`);
+    expect(problemsOf(() => loadConfig(paths))[0]).toMatch(/could not be read as YAML: Excessive alias count/);
+    expect(holder.reload()).toMatchObject({ ok: false });
+    expect(holder.current().config.agentName).toBe('Ada');
+  });
+
   it('applies every default of §A.1 when only agent_name is set', () => {
     writeYaml('agent_name: Ada\n');
     const { config } = loadConfig(paths);

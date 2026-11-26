@@ -1,4 +1,3 @@
-import { matchesGlob } from 'node:path';
 import type { Paths } from '../paths.js';
 import type {
   AgentConfig,
@@ -11,7 +10,7 @@ import type {
   ToolDefinition,
 } from '../types.js';
 import { checkMemoryContent, contentAfterEdit, memoryFileKind } from './memory-limits.js';
-import { checkFilePath, errorText, missionAreas, type PathAccess } from './path-rules.js';
+import { checkFilePath, errorText, isInside, missionAreas, type MissionAreas, type PathAccess } from './path-rules.js';
 
 /** The SDK's file tools. The gate applies the path rules of §E.2.1 to these, never gates. */
 export const FILE_TOOL_NAMES = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'] as const;
@@ -109,18 +108,22 @@ export function createGate(options: GateOptions): Gate {
     if (typeof raw !== 'string' || raw === '') return deny('Grep is refused: the path is not a text.');
     const result = checkFilePath(paths, manifest.id, raw, 'read');
     if (!result.ok) return deny(result.message);
-    // A search of the mission's folder itself would also search manifest.yaml.
-    let missionDir: string;
+    // Grep reads file contents. A search that starts at the mission folder itself would also
+    // read manifest.yaml, and no check of the glob can be sure to keep it out, because the
+    // glob is read by ripgrep with its own rules. So Grep may start only inside the folders
+    // that hold no manifest. Ripgrep does not follow symbolic links inside those folders.
+    let areas: MissionAreas;
     try {
-      missionDir = missionAreas(paths, manifest.id).mission;
+      areas = missionAreas(paths, manifest.id);
     } catch (err) {
       return deny(`Grep is refused: the path could not be checked (${errorText(err)}).`);
     }
-    if (result.realPath === missionDir && !globExcludesManifest(input.glob)) {
+    const roots = [areas.memory, areas.data, areas.skills, areas.core].filter((p): p is string => p !== undefined);
+    if (!roots.some((root) => isInside(result.realPath, root))) {
       return deny(
-        'Grep is refused: a search of the whole mission folder would also search manifest.yaml, ' +
-          'which a mission cannot read. Search a subfolder such as memory, data or skills, ' +
-          'or give a glob that does not match manifest.yaml, such as "*.md".',
+        `Grep is refused for "${raw}": Grep can search only inside the memory, data or skills folder ` +
+          'of this mission, or the core folder, because a search of the mission folder itself would ' +
+          'also read manifest.yaml. Set the path field to one of those folders, for example "memory".',
       );
     }
     return { decision: 'allow' };
@@ -195,7 +198,13 @@ export function createGate(options: GateOptions): Gate {
       return deny('The shell command is refused: the call gives no command.');
     }
     const declared = catalog.findOperation(SHELL_TOOL_NAME);
-    return { decision: 'ask', action: declared?.operation.action ?? SHELL_ACTION, note: command };
+    const action = declared?.operation.action ?? SHELL_ACTION;
+    // Every shell command waits for approval, so an allow gate cannot remove the approval (§C.5).
+    // A deny gate is stricter than that, so it holds.
+    if (strictestGate(manifest, action)?.kind === 'gate:deny') {
+      return deny(`The shell command is refused: this mission's gates forbid the action ${action}.`);
+    }
+    return { decision: 'ask', action, note: command };
   }
 
   function checkDeclared(toolName: string, manifest: Manifest): GateDecision {
@@ -261,38 +270,6 @@ function checkPattern(field: string, raw: unknown): string | null {
     return `the ${field} "${raw}" climbs out of the folder with "..".`;
   }
   return null;
-}
-
-/**
- * True when the glob filter surely leaves out `manifest.yaml`. The Grep tool may split the glob
- * on spaces and on commas outside braces. A part that starts with `!` only removes files, so at
- * least one other part must exist and none may match.
- */
-function globExcludesManifest(glob: unknown): boolean {
-  if (typeof glob !== 'string' || glob.trim() === '') return false;
-  const parts = splitGlob(glob);
-  const positive = parts.filter((p) => !p.startsWith('!'));
-  if (positive.length === 0) return false;
-  const candidates = [...positive, glob];
-  return candidates.every((p) => !matchesGlob('manifest.yaml', p) && !matchesGlob('manifest.yaml', `**/${p}`));
-}
-
-function splitGlob(glob: string): string[] {
-  const parts: string[] = [];
-  let depth = 0;
-  let current = '';
-  for (const ch of glob) {
-    if (ch === '{') depth += 1;
-    if (ch === '}') depth = Math.max(0, depth - 1);
-    if ((/\s/.test(ch) || (ch === ',' && depth === 0)) && current !== '') {
-      parts.push(current);
-      current = '';
-    } else if (!/\s/.test(ch) && !(ch === ',' && depth === 0)) {
-      current += ch;
-    }
-  }
-  if (current !== '') parts.push(current);
-  return parts;
 }
 
 function isSafeMissionId(id: string): boolean {

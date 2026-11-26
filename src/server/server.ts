@@ -175,11 +175,7 @@ export function createLocalServer(options: LocalServerOptions): LocalServer {
         body = await readJsonBody(req, maxBody);
       } catch (err) {
         if (err instanceof HttpError) {
-          if (err.status === 413) {
-            // Stop reading the body and close the connection after the answer.
-            res.setHeader('Connection', 'close');
-            req.resume();
-          }
+          if (err.status === 413) return refuseLargeBody(req, res, err.message, maxBody);
           return sendText(res, err.status, err.message);
         }
         throw err;
@@ -345,6 +341,44 @@ function send(res: ServerResponse, status: number, contentType: string, body: st
 
 function sendText(res: ServerResponse, status: number, text: string): void {
   send(res, status, 'text/plain; charset=utf-8', text);
+}
+
+/** How much of a refused body is read and dropped, as a multiple of the limit, and for how long. */
+const DRAIN_FACTOR = 8;
+const DRAIN_MS = 10_000;
+
+/**
+ * Answers 413 and closes the connection. The client may still be sending the body. If the server
+ * closed the connection while unread data arrives, the system would reset the connection, and the
+ * client would get a write error instead of the answer. So the rest of the body is read and dropped
+ * first, up to a limit. A body beyond that limit, or one that takes too long, gets no answer.
+ */
+function refuseLargeBody(req: IncomingMessage, res: ServerResponse, message: string, limit: number): void {
+  res.setHeader('Connection', 'close');
+  const declared = Number(req.headers['content-length']);
+  const drainLimit = limit * DRAIN_FACTOR;
+  if (req.complete || (Number.isFinite(declared) && declared > drainLimit)) {
+    sendText(res, 413, message);
+    return;
+  }
+  let dropped = 0;
+  const timer = setTimeout(() => req.socket.destroy(), DRAIN_MS);
+  timer.unref();
+  const answer = () => {
+    clearTimeout(timer);
+    if (!res.headersSent && !res.destroyed) sendText(res, 413, message);
+  };
+  req.on('data', (chunk: Buffer) => {
+    dropped += chunk.length;
+    if (dropped > drainLimit) {
+      clearTimeout(timer);
+      req.socket.destroy();
+    }
+  });
+  req.once('end', answer);
+  req.once('error', () => clearTimeout(timer));
+  req.once('close', () => clearTimeout(timer));
+  req.resume();
 }
 
 /** The token from the Authorization header, or else from the cookie. */

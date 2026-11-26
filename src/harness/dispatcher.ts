@@ -469,6 +469,19 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       }
     }
 
+    // The files are saved only now that the message is accepted, in the folder of the mission that takes it.
+    if (msg.saveFiles !== undefined) {
+      let saved: string[] | undefined;
+      try {
+        saved = await msg.saveFiles(target.id);
+      } catch (err) {
+        log(`The files of a message for ${target.id} could not be saved: ${errorText(err)}`);
+        return reply(msg.surface, target.id, 'The file could not be saved, so the message was not passed on. Please send it again.');
+      }
+      if (saved === undefined) return;
+      files.push(...saved);
+    }
+
     cancelWaitingApproval(target.id, 'a new chat message arrived for the mission');
     const queue = chatQueues.get(target.id) ?? [];
     queue.push({ kind: 'chat', text: chatText(msg.text, files, target.id), surface: msg.surface });

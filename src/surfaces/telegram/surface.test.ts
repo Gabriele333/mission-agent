@@ -38,7 +38,14 @@ function setup(opts: { tg?: FakeTelegram; store?: Store; over?: Partial<Telegram
   const waiting = new Set<string>();
   const errors: Error[] = [];
   const host: SurfaceHost = {
-    incoming: async (m) => void incoming.push(m),
+    // Saves the files as the dispatcher does once it accepts a message: in the folder of the thread
+    // mission, or of the general mission.
+    incoming: async (m) => {
+      if (m.saveFiles === undefined) return void incoming.push(m);
+      const { saveFiles, ...rest } = m;
+      const files = await saveFiles(m.missionId ?? SYS_GENERAL);
+      if (files !== undefined) incoming.push({ ...rest, files });
+    },
     answerApproval: (id, a) => {
       if (!waiting.has(id)) return false;
       waiting.delete(id);
@@ -379,6 +386,29 @@ describe('files from the user', () => {
     await s.surface.stop();
   });
 
+  it('downloads and saves nothing until the harness accepts the message, and nothing when it refuses it', async () => {
+    const s = setup();
+    const raw: IncomingMessage[] = [];
+    // A host that refuses every message, as the dispatcher does while paused: it never calls saveFiles.
+    s.host.incoming = async (m) => void raw.push(m);
+    await s.surface.start(s.host);
+    s.store.setThread(M1, 41);
+    s.tg.files.set('documents/d1.bin', new TextEncoder().encode('one'));
+    s.tg.push(messageUpdate(s.tg, { thread: 41, caption: 'see this', document: { file_id: 'd1', file_name: 'a.txt', file_size: 3 } }));
+    await until(() => raw.length === 1, 'incoming');
+    await settle();
+    expect(raw[0]).toMatchObject({ surface: 'surface:telegram', text: 'see this', missionId: M1 });
+    expect(raw[0]?.files).toBeUndefined();
+    expect(s.tg.calls('getFile')).toHaveLength(0);
+    expect(s.tg.calls('download')).toHaveLength(0);
+    expect(existsSync(join(root, 'missions', M1, 'data'))).toBe(false);
+
+    // Accepted later: the file goes to the folder the harness names.
+    expect(await raw[0]!.saveFiles!(M1)).toEqual([join(root, 'missions', M1, 'data', 'a.txt')]);
+    expect(readFileSync(join(root, 'missions', M1, 'data', 'a.txt'), 'utf8')).toBe('one');
+    await s.surface.stop();
+  });
+
   it('refuses a file over 20 MB before downloading it', async () => {
     const s = await started();
     s.tg.push(messageUpdate(s.tg, { caption: 'big', document: { file_id: 'd9', file_name: 'big.iso', file_size: 30_000_000 } }));
@@ -604,6 +634,59 @@ describe('approvals', () => {
   it('closeApproval for a request it never showed does nothing', async () => {
     const s = await started();
     await s.surface.closeApproval('apr_unknown', 'approved');
+    expect(s.tg.calls('editMessageText')).toHaveLength(0);
+    await s.surface.stop();
+  });
+
+  /** Shows a request, then stops the surface and starts a new one on the same store, as a new bot token does. */
+  async function shownThenRestarted() {
+    const first = await shown();
+    first.store.saveApproval(first.req);
+    await first.surface.stop();
+    const polls = first.tg.calls('getUpdates').length;
+    const second = setup({ tg: first.tg, store: first.store });
+    second.waiting.add(first.req.id);
+    await second.surface.start(second.host);
+    await until(() => first.tg.calls('getUpdates').length > polls, 'poll of the new surface');
+    return { ...second, req: first.req, messageId: first.messageId };
+  }
+
+  it('after a restart, reject on a request that still waits asks for the reason and takes the reply', async () => {
+    const s = await shownThenRestarted();
+    s.tg.push(pressUpdate(s.tg, `r:${s.req.id}`, s.messageId));
+    await until(() => s.tg.calls('editMessageText').length === 1, 'edit');
+    const edit = s.tg.calls('editMessageText')[0]!.params;
+    expect(edit.message_id).toBe(s.messageId);
+    expect(String(edit.text)).toMatch(/Reply to this message to give the reason/);
+    expect(keyboardOf(edit)).toEqual([[{ text: 'No reason', callback_data: `n:${s.req.id}` }]]);
+    expect(s.tg.calls('editMessageReplyMarkup')).toHaveLength(0);
+
+    s.tg.push(textUpdate(s.tg, 'Not now.', { thread: 500, replyTo: s.messageId }));
+    await until(() => s.answers.length === 1, 'answer');
+    expect(s.answers).toEqual([[s.req.id, { kind: 'rejected', reason: 'Not now.' }]]);
+    expect(s.incoming).toEqual([]);
+    await s.surface.stop();
+  });
+
+  it('after a restart, approve answers the request and closeApproval shows the outcome on the old message', async () => {
+    const s = await shownThenRestarted();
+    s.tg.push(pressUpdate(s.tg, `a:${s.req.id}`, s.messageId));
+    await until(() => s.answers.length === 1, 'answer');
+    expect(s.answers).toEqual([[s.req.id, { kind: 'approved' }]]);
+    await s.surface.closeApproval(s.req.id, 'approved');
+    const edit = s.tg.calls('editMessageText').at(-1)!.params;
+    expect(edit).toMatchObject({ message_id: s.messageId, reply_markup: { inline_keyboard: [] } });
+    expect(String(edit.text)).toMatch(/Outcome: approved$/);
+    await s.surface.stop();
+  });
+
+  it('after a restart, a press on a request that no longer waits says so and removes the buttons', async () => {
+    const s = await shownThenRestarted();
+    s.store.deleteApproval(s.req.id);
+    s.waiting.delete(s.req.id);
+    s.tg.push(pressUpdate(s.tg, `r:${s.req.id}`, s.messageId));
+    await until(() => s.tg.calls('editMessageReplyMarkup').length === 1, 'button removal');
+    expect(s.tg.calls('answerCallbackQuery').at(-1)!.params.text).toBe('This request is no longer waiting for an answer.');
     expect(s.tg.calls('editMessageText')).toHaveLength(0);
     await s.surface.stop();
   });

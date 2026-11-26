@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Paths } from '../paths.js';
+import { visibleLine } from '../safety/index.js';
 import { REGISTRY_ACTION_IDS } from '../tools/index.js';
 import type { ApprovalRequest, Manifest, MissionRegistry, Store } from '../types.js';
 
@@ -65,7 +66,8 @@ function asList<T>(value: unknown): T[] {
 
 async function createDetails(input: Record<string, unknown>, ctx: ApprovalDetailsContext): Promise<string> {
   const draft = (input.manifest ?? {}) as Record<string, unknown>;
-  const name = typeof draft.name === 'string' ? draft.name : '(no name)';
+  // The draft is not validated yet, so its name may hold a line break or a control character.
+  const name = typeof draft.name === 'string' ? visibleLine(draft.name) : '(no name)';
   const missing = await missingOf({ tools: asList<string>(draft.tools), triggers: asList(draft.triggers) }, ctx);
   return [`Creates the mission ${name} with the manifest below.`, missingText(missing)].join('\n');
 }
@@ -86,7 +88,7 @@ function indent(text: string): string {
 
 async function editDetails(input: Record<string, unknown>, ctx: ApprovalDetailsContext): Promise<string> {
   const current = findMission(input.mission, ctx);
-  if (current === undefined) return `There is no loaded mission "${show(input.mission)}". The edit will fail.`;
+  if (current === undefined) return `There is no loaded mission "${visibleLine(show(input.mission))}". The edit will fail.`;
   const changes = (input.changes ?? {}) as Record<string, unknown>;
   const lines = [`Changes to the mission ${current.name} (${current.id}), now at version ${current.version}:`];
   const record = current as unknown as Record<string, unknown>;
@@ -95,10 +97,10 @@ async function editDetails(input: Record<string, unknown>, ctx: ApprovalDetailsC
     const now = field === 'context' ? current.context.instructions : record[field];
     const after = field === 'context' && next !== null && typeof next === 'object' ? (next as { instructions?: unknown }).instructions : next;
     if (JSON.stringify(now) === JSON.stringify(after)) {
-      lines.push(`- ${field}: unchanged`);
+      lines.push(`- ${visibleLine(field)}: unchanged`);
       continue;
     }
-    const label = field === 'context' ? 'context.instructions' : field;
+    const label = field === 'context' ? 'context.instructions' : visibleLine(field);
     lines.push(`- ${label}`, '  now:', indent(show(now)), '  new:', indent(show(after)));
   }
   const tools = changes.tools !== undefined && changes.tools !== null ? asList<string>(changes.tools) : current.tools;
@@ -109,7 +111,7 @@ async function editDetails(input: Record<string, unknown>, ctx: ApprovalDetailsC
 
 function freezeDetails(input: Record<string, unknown>, ctx: ApprovalDetailsContext): string {
   const current = findMission(input.mission, ctx);
-  const name = current?.name ?? show(input.mission);
+  const name = current?.name ?? visibleLine(show(input.mission));
   if (input.frozen === false) return `Makes the frozen mission ${name} active again.`;
   return `Freezes the mission ${name}: it no longer runs, its waiting approvals are cancelled, and its folder is kept.`;
 }
@@ -135,7 +137,7 @@ function plural(n: number, one: string, many: string): string {
 
 function deleteDetails(input: Record<string, unknown>, ctx: ApprovalDetailsContext): string {
   const current = findMission(input.mission, ctx);
-  if (current === undefined) return `There is no loaded mission "${show(input.mission)}". The deletion may fail.`;
+  if (current === undefined) return `There is no loaded mission "${visibleLine(show(input.mission))}". The deletion may fail.`;
   const id = current.id;
   // The memory index is a file of the memory folder, but not a note.
   const notes = Math.max(0, countFiles(ctx.paths.memoryDir(id)) - 1);

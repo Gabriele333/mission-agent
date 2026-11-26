@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -16,6 +17,7 @@ import {
   type HarnessOptions,
   type HarnessStatus,
 } from '../harness/index.js';
+import { attachPages, DASHBOARD_PATH, SETUP_PATH } from '../pages/index.js';
 import { DEFAULT_ROOT, pathsFor, type Paths } from '../paths.js';
 import { loginHelp } from '../run/index.js';
 import {
@@ -30,7 +32,17 @@ import {
   terminalIo,
   type TerminalInput,
 } from '../secrets/index.js';
-import { isServerAlive, readServerFile, serverUrl, type ServerInfo } from '../server/index.js';
+import { isServerAlive, pageUrl, readServerFile, serverUrl, type ServerInfo } from '../server/index.js';
+import {
+  installService,
+  ServiceError,
+  servicePlan,
+  serviceStatus,
+  uninstallService,
+  type ServiceOptions,
+  type ServicePlan,
+} from '../service/index.js';
+import { shellQuote } from '../pages/setup-routes.js';
 import { ChatClientError, runChatClient } from '../surfaces/terminal/index.js';
 import type { AgentConfig, SecretStore } from '../types.js';
 import { readMissionsFromFiles, requiredFromFiles } from './offline.js';
@@ -47,6 +59,10 @@ export interface CliIo {
   createHarness?: (options: HarnessOptions) => Harness;
   /** Resolves with the name of the signal that ends `start`. Default: SIGINT or SIGTERM. */
   waitForSignal?: () => Promise<string>;
+  /** Opens an address in the browser. Default: the macOS `open` command. */
+  openUrl?: (url: string) => Promise<void>;
+  /** Replaces parts of the service options, such as the launchctl runner. For tests. */
+  serviceOptions?: Omit<ServiceOptions, 'root'>;
 }
 
 /** An expected error: its message is printed without a stack trace. */
@@ -72,11 +88,16 @@ Commands:
   secret delete <id>          Remove a credential.
   secret list                 Show each required credential and whether it has a value.
   login-help                  Show how to sign in with a Claude plan, or how to use an API key.
-  setup                       Open the setup page (not part of this version yet).
-  dashboard                   Open the dashboard (not part of this version yet).
+  setup [--no-open]           Open the setup page of the running harness in the browser.
+  dashboard [--no-open]       Open the dashboard of the running harness in the browser.
+                              With --no-open, print the address instead.
+  service install             Install the harness as a macOS service (a LaunchAgent) that starts
+                              at login. Needs --root. It shows what it writes before it writes it.
+  service uninstall           Stop and remove the service. Needs --root.
+  service status              Show whether the service is installed and running. Needs --root.
 
 Options:
-  --root <path>   The agent's root folder. Default: ~/mission-agent
+  --root <path>   The agent's root folder. Default: ~/mission-agent. The service commands need it.
   -h, --help      Show this help.`;
 
 const OPTIONS = {
@@ -85,6 +106,7 @@ const OPTIONS = {
   surface: { type: 'string' },
   login: { type: 'string' },
   'telegram-user-id': { type: 'string' },
+  'no-open': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const;
 
@@ -94,6 +116,7 @@ type Values = {
   surface?: string | undefined;
   login?: string | undefined;
   'telegram-user-id'?: string | undefined;
+  'no-open'?: boolean | undefined;
   help?: boolean | undefined;
 };
 
@@ -105,23 +128,9 @@ const COMMAND_OPTIONS: Record<string, (keyof Values)[]> = {
   status: [],
   secret: [],
   'login-help': [],
-  setup: [],
-  dashboard: [],
-};
-
-/**
- * The two local pages. Another developer builds them next and replaces these two handlers.
- * Each one gets the root folder and prints to `out`.
- */
-const PAGE_COMMANDS: Record<'setup' | 'dashboard', (paths: Paths, out: (line: string) => void) => Promise<number>> = {
-  async setup(_paths, out) {
-    out('The setup page is not part of this version yet. Use "mission-agent init" to create agent.yaml.');
-    return 1;
-  },
-  async dashboard(_paths, out) {
-    out('The dashboard is not part of this version yet. Use "mission-agent status" to see the harness and its missions.');
-    return 1;
-  },
+  setup: ['no-open'],
+  dashboard: ['no-open'],
+  service: [],
 };
 
 function expandRoot(raw: string | undefined): string {
@@ -161,7 +170,7 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
     err(`Unknown command "${command}". Run "mission-agent --help" to see the commands.`);
     return 2;
   }
-  for (const key of ['name', 'surface', 'login', 'telegram-user-id'] as const) {
+  for (const key of ['name', 'surface', 'login', 'telegram-user-id', 'no-open'] as const) {
     if (values[key] !== undefined && !allowed.includes(key)) {
       err(`The option --${key} is not used by the ${command} command.`);
       return 2;
@@ -194,7 +203,9 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
       case 'setup':
       case 'dashboard':
         expectArgs(positionals, 1, command);
-        return await PAGE_COMMANDS[command](paths, out);
+        return await pageCommand(paths, rootFlag, command, values['no-open'] === true, io, out);
+      case 'service':
+        return await serviceCommand(paths, positionals, values.root !== undefined, io, out);
       default:
         return 2;
     }
@@ -204,7 +215,12 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
       return e.exitCode;
     }
     // Errors that the modules raise for a wrong input or a missing Keychain are expected too.
-    if (e instanceof InvalidCredentialIdError || e instanceof KeychainUnavailableError || e instanceof ConfigError) {
+    if (
+      e instanceof InvalidCredentialIdError ||
+      e instanceof KeychainUnavailableError ||
+      e instanceof ConfigError ||
+      e instanceof ServiceError
+    ) {
       err(e.message);
       return 1;
     }
@@ -271,6 +287,8 @@ async function startCommand(
   const make = io.createHarness ?? createHarness;
   const log = (text: string) => io.stderr.write(`${new Date().toISOString()} ${text}\n`);
   const harness = make({ root: paths.root, log });
+  // The setup page and the dashboard are served by this harness (§J).
+  attachPages(harness, { log, ...(io.serviceOptions !== undefined ? { service: io.serviceOptions } : {}) });
   try {
     await harness.start();
   } catch (e) {
@@ -285,6 +303,7 @@ async function startCommand(
   out(`The harness is running for ${paths.root} (process ${st.pid}).`);
   out(st.paused ? `It started paused. ${st.pauseReason}` : 'It is not paused.');
   out(`Chat with it from another terminal: mission-agent chat${rootFlag}`);
+  out(`Open the setup page: mission-agent setup${rootFlag}    The dashboard: mission-agent dashboard${rootFlag}`);
   if (st.defaultSurface === 'telegram') out('You can also write to the Telegram bot.');
   out('Press Ctrl+C to stop it.');
   const signal = await (io.waitForSignal ?? waitForSignalDefault)();
@@ -476,5 +495,102 @@ function loginHelpCommand(paths: Paths, rootFlag: string, out: (line: string) =>
   out('');
   out('To use an API key from the Claude Console instead, set "model_login: api_key" in agent.yaml.');
   out(`Then store the key: mission-agent secret set ${MODEL_API_KEY}${rootFlag}`);
+  return 0;
+}
+
+// ---------------------------------------------------------------- setup and dashboard
+
+function openInBrowser(url: string): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    // An argument array and no shell: the address is passed as one argument.
+    execFile('/usr/bin/open', [url], { timeout: 15_000 }, (e) => (e === null ? resolvePromise() : reject(e)));
+  });
+}
+
+async function pageCommand(
+  paths: Paths,
+  rootFlag: string,
+  which: 'setup' | 'dashboard',
+  noOpen: boolean,
+  io: CliIo,
+  out: (line: string) => void,
+): Promise<number> {
+  const name = which === 'setup' ? 'setup page' : 'dashboard';
+  const info = await runningHarness(paths);
+  if (info === undefined) {
+    out(`The harness is not running for ${paths.root}, so the ${name} cannot open.`);
+    out(`Start it first with: mission-agent start${rootFlag}`);
+    if (which === 'setup') out('Without a configuration it starts paused, and it serves the setup page.');
+    return 1;
+  }
+  const url = pageUrl(info, which === 'setup' ? SETUP_PATH : DASHBOARD_PATH);
+  if (noOpen) {
+    out(`Open this address in a browser on this computer: ${url}`);
+    out('The address holds the access token of this start of the harness. Do not share it.');
+    return 0;
+  }
+  try {
+    await (io.openUrl ?? openInBrowser)(url);
+  } catch (e) {
+    throw new CliError(`The browser could not be opened: ${errorText(e)} Run "mission-agent ${which} --no-open${rootFlag}" to get the address.`);
+  }
+  out(`Opened the ${name} in the browser.`);
+  return 0;
+}
+
+// ---------------------------------------------------------------- service
+
+function printPlan(plan: ServicePlan, out: (line: string) => void): void {
+  out(`The service for the root folder ${plan.root}:`);
+  out(`  File:     ${plan.plistPath}`);
+  out(`  Label:    ${plan.label}`);
+  out(`  Command:  ${plan.programArguments.map(shellQuote).join(' ')}`);
+  out(`  Logs:     ${plan.stdoutPath}`);
+  out(`            ${plan.stderrPath}`);
+  out(`  PATH:     ${plan.envPath}`);
+  out('  It starts the harness at login, and again after a crash.');
+}
+
+async function serviceCommand(
+  paths: Paths,
+  positionals: string[],
+  rootGiven: boolean,
+  io: CliIo,
+  out: (line: string) => void,
+): Promise<number> {
+  const sub = positionals[1];
+  if (sub !== 'install' && sub !== 'uninstall' && sub !== 'status') {
+    throw new CliError('Use one of: mission-agent service install, service uninstall, service status (each with --root <path>)', 2);
+  }
+  expectArgs(positionals, 2, `service ${sub}`);
+  // The root folder is the user's choice. The service records it, so it is never assumed.
+  if (!rootGiven) {
+    throw new CliError(`service ${sub} needs the agent's root folder: mission-agent service ${sub} --root <path>`, 2);
+  }
+  const options: ServiceOptions = { ...io.serviceOptions, root: paths.root };
+
+  if (sub === 'status') {
+    const st = await serviceStatus(options);
+    out(`Service ${st.label} for ${paths.root}:`);
+    out(`  File:     ${st.plistPath} (${st.installed ? 'present' : 'not present'})`);
+    if (!st.loaded) out('  launchd:  not loaded');
+    else out(`  launchd:  loaded, ${st.state ?? 'state unknown'}${st.pid !== undefined ? `, process ${st.pid}` : ''}`);
+    return 0;
+  }
+
+  const plan = servicePlan(options);
+  if (sub === 'install') {
+    printPlan(plan, out);
+    out(`Writing ${plan.plistPath} and loading it with: launchctl bootstrap ${plan.domain} ${shellQuote(plan.plistPath)}`);
+    const result = await installService(options);
+    out(result.replaced ? 'The old service was removed, and the new one is installed and loaded.' : 'The service is installed and loaded.');
+    out(`It starts the harness now and at each login. Check it with: mission-agent service status --root ${shellQuote(plan.root)}`);
+    return 0;
+  }
+
+  out(`Removing the service ${plan.label}: launchctl bootout ${plan.domain}/${plan.label}, then the file ${plan.plistPath}.`);
+  const result = await uninstallService(options);
+  if (!result.wasLoaded && !result.removedFile) out('The service was not installed. Nothing was changed.');
+  else out(`The service is removed.${result.wasLoaded ? ' It stopped the harness it ran.' : ''}`);
   return 0;
 }

@@ -221,7 +221,7 @@ describe('file tools: reading', () => {
     expectDeny(check('Read', { file_path: 'memory/note.md\0' }));
   });
 
-  it('checks Glob and Grep paths, defaulting to the mission folder', () => {
+  it('checks Glob and Grep paths, with the mission folder as the default path', () => {
     expectAllow(check('Glob', { pattern: '**/*.md' }));
     expectAllow(check('Glob', { pattern: '*.md', path: 'memory' }));
     expectAllow(check('Glob', { pattern: '*.md', path: paths.coreDir }));
@@ -246,16 +246,35 @@ describe('file tools: reading', () => {
     expectAllow(check('Grep', { pattern: 'a..b', path: 'memory' }));
   });
 
-  it('refuses a Grep of the whole mission folder unless the glob leaves out manifest.yaml', () => {
-    expectDeny(check('Grep', { pattern: 'gate' }), /manifest\.yaml/);
+  it('refuses a Grep that starts at the mission folder itself, whatever the glob', () => {
+    expectDeny(check('Grep', { pattern: 'gate' }), /memory, data or skills/);
     expectDeny(check('Grep', { pattern: 'gate', path: '.' }));
-    expectDeny(check('Grep', { pattern: 'gate', glob: '*.yaml' }));
-    expectDeny(check('Grep', { pattern: 'gate', glob: '*.md,*.yaml' }));
-    expectDeny(check('Grep', { pattern: 'gate', glob: '*.md *.yaml' }));
-    expectDeny(check('Grep', { pattern: 'gate', glob: '!*.md' }));
-    expectDeny(check('Grep', { pattern: 'gate', glob: '{*.md,*.yaml}' }));
-    expectAllow(check('Grep', { pattern: 'gate', glob: '*.md' }));
-    expectAllow(check('Grep', { pattern: 'gate', glob: '*.{md,txt}' }));
+    expectDeny(check('Grep', { pattern: 'gate', path: mission }));
+    expectDeny(check('Grep', { pattern: 'gate', path: 'memory/..' }));
+    expectDeny(check('Grep', { pattern: 'gate', path: realpathSync(mission) }));
+    // Globs that ripgrep matches to manifest.yaml but Node's glob matcher does not.
+    for (const glob of ['manifest\\.yaml', 'manifest.{yaml}', 'manifest.yam{l}', '{manifest.yaml}', '*.md', '*.{md,txt}', '!*.md']) {
+      expectDeny(check('Grep', { pattern: 'gate', glob }));
+      expectDeny(check('Grep', { pattern: 'gate', path: '.', glob }));
+    }
+    expectDeny(check('Grep', { pattern: 'id', path: 'data/link-manifest' }), /manifest\.yaml/);
+  });
+
+  it('allows a Grep inside memory, data, skills and core, with or without a glob', () => {
+    expectAllow(check('Grep', { pattern: 'hello', path: 'memory' }));
+    expectAllow(check('Grep', { pattern: 'hello', path: 'memory/note.md' }));
+    expectAllow(check('Grep', { pattern: 'hello', path: paths.memoryDir(ID), glob: '*.md' }));
+    expectAllow(check('Grep', { pattern: 'x', path: 'data', glob: '*.{txt,csv}' }));
+    expectAllow(check('Grep', { pattern: 'x', path: './skills' }));
+    expectAllow(check('Grep', { pattern: 'x', path: 'skills/s' }));
+    expectAllow(check('Grep', { pattern: 'Sam', path: paths.coreDir }));
+    expectAllow(check('Grep', { pattern: 'Sam', path: paths.coreMemoryFile }));
+  });
+
+  it('allows Glob on the mission folder, because Glob lists names and reads no content', () => {
+    expectAllow(check('Glob', { pattern: '*' }));
+    expectAllow(check('Glob', { pattern: 'manifest.yaml' }));
+    expectAllow(check('Glob', { pattern: '**/*', path: mission }));
   });
 });
 
@@ -377,7 +396,29 @@ describe('shell', () => {
     expectDeny(check('Bash', { command: 'ls' }), /does not have the shell tool/);
   });
 
-  it('always asks with tool:shell and shows the full command, whatever the gates say', () => {
+  it('denies a shell command when a deny gate names the shell action, even next to an allow gate', () => {
+    const m = manifest({
+      tools: ['tool:shell'],
+      gates: [
+        { use: 'gate:allow', for: 'action:shell.command' },
+        { use: 'gate:deny', for: 'action:shell.command' },
+      ],
+    });
+    expectDeny(check('Bash', { command: 'rm -rf data' }, m), /gates forbid the action action:shell\.command/);
+    const approval = manifest({ tools: ['tool:shell'], gates: [{ use: 'gate:require_approval', for: 'action:shell.command' }] });
+    expect(check('Bash', { command: 'ls' }, approval)).toEqual({ decision: 'ask', action: 'action:shell.command', note: 'ls' });
+  });
+
+  it('applies a deny gate to action:shell.run when the catalog declares no action for Bash', () => {
+    const bare = createGate({ paths, config: () => config, catalog: fakeCatalog([], []) });
+    const m = manifest({ tools: ['tool:shell'], gates: [{ use: 'gate:deny', for: 'action:shell.run' }] });
+    const d = bare.check({ toolName: 'Bash', input: { command: 'ls' }, toolUseId: 't1' }, m);
+    expectDeny(d, /action:shell\.run/);
+    const open = manifest({ tools: ['tool:shell'] });
+    expect(bare.check({ toolName: 'Bash', input: { command: 'ls' }, toolUseId: 't1' }, open)).toMatchObject({ decision: 'ask', action: 'action:shell.run' });
+  });
+
+  it('always asks with tool:shell and shows the full command, whatever the allow gates say', () => {
     const command = `rm -rf data/old && echo ${'x'.repeat(3000)}`;
     const m = manifest({
       tools: ['tool:shell'],

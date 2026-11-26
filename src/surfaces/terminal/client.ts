@@ -99,6 +99,13 @@ export async function runChatClient(options: ChatClientOptions): Promise<void> {
   const terminal = Boolean((input as { isTTY?: boolean }).isTTY && (output as { isTTY?: boolean }).isTTY);
   const rl = createInterface({ input, output, terminal, prompt: '> ' });
   const waiting = new Map<string, Waiting>();
+  /**
+   * The numbers of the requests that waited before the stream dropped. The harness sends the
+   * requests that still wait at each connection, and each one gets its old number back.
+   */
+  let earlier = new Map<string, number>();
+  /** The next number. It starts at 1 again only when no request waits, so no number is reused. */
+  let nextNumber = 1;
   const pending = new Set<Promise<void>>();
   const ended = new AbortController();
   let streamAbort: AbortController | undefined;
@@ -120,11 +127,21 @@ export async function runChatClient(options: ChatClientOptions): Promise<void> {
     return [...waiting.values()].map((w) => w.number).sort((a, b) => a - b);
   }
 
-  function freeNumber(): number {
-    const used = new Set(numbers());
-    let n = 1;
-    while (used.has(n)) n++;
-    return n;
+  /**
+   * The number of a new request. A number refers to one request for as long as it waits, and it is
+   * not given to another request while any request waits, so "approve 1" cannot reach a request
+   * that arrived after the user read number 1.
+   */
+  function numberFor(id: string): number {
+    const old = earlier.get(id);
+    if (old !== undefined) {
+      earlier.delete(id);
+      return old;
+    }
+    if (waiting.size === 0 && earlier.size === 0) nextNumber = 1;
+    const used = new Set([...numbers(), ...earlier.values()]);
+    while (used.has(nextNumber)) nextNumber++;
+    return nextNumber++;
   }
 
   function current(): ServerInfo {
@@ -195,7 +212,7 @@ export async function runChatClient(options: ChatClientOptions): Promise<void> {
       case 'approval': {
         const a = data as ChatApprovalEvent;
         if (waiting.has(a.id)) break;
-        const number = freeNumber();
+        const number = numberFor(a.id);
         waiting.set(a.id, { number, id: a.id });
         const how =
           waiting.size > 1
@@ -244,7 +261,8 @@ export async function runChatClient(options: ChatClientOptions): Promise<void> {
       }
 
       if (body) {
-        // The harness sends the requests that still wait at each connection, with new numbers.
+        // The harness sends the requests that still wait at each connection. They keep their numbers.
+        earlier = new Map([...waiting.values()].map((w) => [w.id, w.number]));
         waiting.clear();
         shownEarlierHeading = false;
         if (first) print('Connected to the harness. Type a message and press Enter. Ctrl+C ends the chat.\n');

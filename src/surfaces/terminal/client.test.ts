@@ -204,6 +204,39 @@ describe('runChatClient', () => {
     expect(h.host.incomingCalls).toEqual([]);
   });
 
+  it('never gives a number to a new request while another request waits', async () => {
+    const h = await harness();
+    const chat = startChat(h.paths);
+    await chat.waitForText('Connected to the harness.');
+    for (const id of ['apr_a', 'apr_b']) {
+      h.host.waitingIds.add(id);
+      await h.surface.showApproval(approvalRequest(id), LABEL);
+    }
+    await chat.waitForText(`Approval request 2 · ${LABEL}`);
+    chat.type('approve 1');
+    await chat.waitForText('Approval request 1 is closed: approved.');
+
+    // apr_b still waits as number 2, so the new request gets 3, not the free number 1.
+    h.host.waitingIds.add('apr_c');
+    await h.surface.showApproval(approvalRequest('apr_c'), LABEL);
+    await chat.waitForText(`Approval request 3 · ${LABEL}`);
+    expect(chat.out().split(`Approval request 1 · ${LABEL}`)).toHaveLength(2);
+    chat.type('approve 1');
+    await chat.waitForText('No approval request number 1 is waiting.');
+    expect(h.host.answers).toEqual([{ id: 'apr_a', answer: { kind: 'approved' } }]);
+    chat.type('approve 3');
+    await chat.waitForText('Approval request 3 is closed: approved.');
+    expect(h.host.answers.at(-1)).toEqual({ id: 'apr_c', answer: { kind: 'approved' } });
+    chat.type('approve');
+    await chat.waitForText('Approval request 2 is closed: approved.');
+    expect(h.host.answers.at(-1)).toEqual({ id: 'apr_b', answer: { kind: 'approved' } });
+
+    // With no request waiting, the numbers start at 1 again.
+    h.host.waitingIds.add('apr_d');
+    await h.surface.showApproval(approvalRequest('apr_d'), LABEL);
+    await chat.waitForText(`Approval request 1 · ${LABEL}`, 2);
+  });
+
   it('says so when the request no longer waits', async () => {
     const h = await harness();
     const chat = startChat(h.paths);

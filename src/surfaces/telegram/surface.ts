@@ -43,6 +43,7 @@ const APPROVAL_PART_LIMIT = 3500;
 const CALLBACK_DATA_MAX_BYTES = 64;
 
 const NOT_WAITING = 'This request is no longer waiting for an answer.';
+const TOO_LARGE = 'The file is larger than 20 MB, the most a bot can download. It was not saved and the message was not passed on.';
 const REASON_PROMPT =
   '\n\nRejected. Reply to this message to give the reason, or press "No reason". ' +
   'Without either, the request is rejected with no reason in 5 minutes.';
@@ -273,12 +274,18 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     for (const key of entry.keys) approvalOfKey.delete(key);
   }
 
-  async function showApproval(req: ApprovalRequest, label: string): Promise<void> {
-    requireHost();
-    requireUser();
+  /** The parts of a request's text. The last one goes on the message with the buttons. */
+  function approvalParts(req: ApprovalRequest): { parts: string[]; last: string } {
     const body = describeApproval(req, options.missionName(req.missionId) ?? req.missionId);
     const parts = splitText(body, APPROVAL_PART_LIMIT).filter((p) => p.trim() !== '');
     const last = parts.pop() ?? req.action;
+    return { parts, last };
+  }
+
+  async function showApproval(req: ApprovalRequest, label: string): Promise<void> {
+    requireHost();
+    requireUser();
+    const { parts, last } = approvalParts(req);
     await enqueue(() =>
       inThread(req.missionId, label, async (threadId) => {
         for (const part of parts) await postText(threadId, part);
@@ -348,10 +355,34 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     }
   }
 
+  /**
+   * The entry for a press on a request that this surface object did not show, because the surface
+   * was stopped and started again (a new bot token, or pairing on the setup page) while the
+   * request waited. The request must still wait in the store, and the press must come from a
+   * message that Telegram still lets the bot edit. Undefined otherwise.
+   */
+  function adopt(query: TgCallbackQuery, id: string): ShownApproval | undefined {
+    const message = query.message;
+    if (!message || message.date === 0) return undefined;
+    let req: ApprovalRequest | undefined;
+    try {
+      req = requireHost().store.listApprovals().find((r) => r.id === id);
+    } catch (err) {
+      report(err);
+      return undefined;
+    }
+    if (req === undefined) return undefined;
+    const text = typeof message.text === 'string' && message.text !== '' ? message.text : approvalParts(req).last;
+    const entry: ShownApproval = { id, missionId: req.missionId, messageId: message.message_id, text, state: 'buttons', keys: [] };
+    approvals.set(id, entry);
+    approvalOfMessage.set(entry.messageId, id);
+    return entry;
+  }
+
   async function handleCallback(query: TgCallbackQuery): Promise<void> {
     if (!isUserCallback(query, options.userId())) return;
     const parsed = parseCallbackData(query.data);
-    const entry = parsed ? approvals.get(parsed.id) : undefined;
+    const entry = parsed ? (approvals.get(parsed.id) ?? adopt(query, parsed.id)) : undefined;
     // A press without a message (callback_query_mode "inline") is accepted only for a request shown here.
     if (!query.message && !entry) {
       await answerQuery(query, NOT_WAITING);
@@ -433,7 +464,7 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
       fileId = photo.file_id;
       size = photo.file_size;
     }
-    const tooLarge = { refused: 'The file is larger than 20 MB, the most a bot can download. It was not saved and the message was not passed on.' };
+    const tooLarge = { refused: TOO_LARGE };
     if (size !== undefined && size > MAX_DOWNLOAD_BYTES) return tooLarge;
     const file = await call<TgFile>('getFile', { file_id: fileId });
     if (file.file_size !== undefined && file.file_size > MAX_DOWNLOAD_BYTES) return tooLarge;
@@ -450,6 +481,25 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
       ? safeFileName(name ?? `file${ext}`)
       : safeFileName(`photo-${stamp(message.date)}${ext || '.jpg'}`);
     return writeUniqueFile(options.dataDir(missionId), fileName, data);
+  }
+
+  /** Saves the file of a message for `saveFiles`. On a failure it tells the user and returns undefined. */
+  async function saveFileOf(message: TgMessage, missionId: MissionId, threadId: number | undefined): Promise<string[] | undefined> {
+    let saved: string | { refused: string };
+    try {
+      saved = await saveFile(message, missionId);
+    } catch (err) {
+      report(err);
+      if (!(err instanceof StoppedError)) {
+        await note(threadId, 'The file could not be saved, so the message was not passed on. Please send it again.');
+      }
+      return undefined;
+    }
+    if (typeof saved !== 'string') {
+      await note(threadId, saved.refused);
+      return undefined;
+    }
+    return [saved];
   }
 
   async function handleMessage(message: TgMessage): Promise<void> {
@@ -473,31 +523,30 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     // go to triage, so the mission is left unset (§B.1, §B.3).
     const missionId = threadMission !== undefined && threadMission !== general ? threadMission : undefined;
 
-    const files: string[] = [];
-    if (message.document || message.photo) {
-      let saved: string | { refused: string };
-      try {
-        saved = await saveFile(message, missionId ?? general);
-      } catch (err) {
-        if (err instanceof StoppedError) throw err;
-        report(err);
-        await note(threadId, 'The file could not be saved, so the message was not passed on. Please send it again.');
-        return;
-      }
-      if (typeof saved !== 'string') {
-        await note(threadId, saved.refused);
-        return;
-      }
-      files.push(saved);
-    } else if (message.text === undefined) {
+    const hasFile = message.document !== undefined || message.photo !== undefined;
+    if (!hasFile && message.text === undefined) {
       if (UNSUPPORTED_KINDS.some((k) => k in message)) await note(threadId, UNSUPPORTED);
       // Anything else, such as a service message about a topic, is ignored.
+      return;
+    }
+    if (message.document?.file_size !== undefined && message.document.file_size > MAX_DOWNLOAD_BYTES) {
+      await note(threadId, TOO_LARGE);
       return;
     }
 
     const incoming: IncomingMessage = { surface: TELEGRAM_SURFACE_ID, text };
     if (missionId !== undefined) incoming.missionId = missionId;
-    if (files.length > 0) incoming.files = files;
+    // The harness saves the file only after it has accepted the message, in the data folder of
+    // the mission that takes it. A refused message saves nothing.
+    if (hasFile) incoming.saveFiles = (target) => saveFileOf(message, target, threadId);
+    if (hasFile) {
+      // Awaited, so the update counts as handled only after the harness has routed the message
+      // and the file is saved or refused. Routing does not include the run. If the surface stops
+      // meanwhile, the update is not marked as handled and comes again at the next start.
+      await h.incoming(incoming);
+      if (controller === undefined || controller.signal.aborted) throw new StoppedError();
+      return;
+    }
     // Not awaited: a run can take minutes, and button presses must still be read meanwhile.
     h.incoming(incoming).catch(report);
   }

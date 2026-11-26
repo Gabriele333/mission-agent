@@ -72,6 +72,24 @@ interface ActiveRun {
   closeTimer?: ReturnType<typeof setTimeout>;
 }
 
+/** The step and cost limits of one attempt. */
+interface AttemptBudget {
+  maxSteps: number;
+  maxCostUsd: number;
+}
+
+/**
+ * What is left of the run's step and cost limits after the attempts so far, or the text that says
+ * which limit is used up.
+ */
+function budgetLeft(limits: RunLimits, used: Pick<AttemptOutcome, 'steps' | 'usage'>): AttemptBudget | string {
+  const maxSteps = Math.floor(limits.maxSteps - used.steps);
+  const maxCostUsd = limits.maxCostUsd - used.usage.costUsd;
+  if (maxSteps < 1) return `the run used all of its ${limits.maxSteps} steps.`;
+  if (!(maxCostUsd > 0)) return `the run used all of its cost limit of ${limits.maxCostUsd} dollars.`;
+  return { maxSteps, maxCostUsd };
+}
+
 interface AttemptOutcome {
   status: RunStatus;
   error?: string;
@@ -150,6 +168,9 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     let sessionNote: string | undefined;
     const sum: AttemptOutcome = { ...outcomeBase, status: 'failed', toolsCalled: [] };
     let last: AttemptOutcome | undefined;
+    // The step and cost limits hold for the whole run, so a later attempt gets only what is left (§D).
+    let budget: AttemptBudget = { maxSteps: limits.maxSteps, maxCostUsd: limits.maxCostUsd };
+    let usedUp: string | undefined;
 
     for (let first = true; ; first = false) {
       if (entry.stopReason !== undefined) break;
@@ -161,12 +182,18 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
           break;
         }
       }
-      const outcome = await attempt({ req, manifest, loaded, provisions, sessionId, apiKey, notices, entry, clock, limits });
+      const outcome = await attempt({ req, manifest, loaded, provisions, sessionId, apiKey, notices, entry, clock, limits, budget });
       last = outcome;
       addUp(sum, outcome);
 
       if (outcome.sessionNotFound && sessionId !== undefined && !freshSessionTried) {
         // The saved session is gone. Start a new one once. This is not a retry (§C.3).
+        const left = budgetLeft(limits, sum);
+        if (typeof left === 'string') {
+          usedUp = left;
+          break;
+        }
+        budget = left;
         freshSessionTried = true;
         sessionNote = `The saved session ${sessionId} was not found, so a new session was started.`;
         safe(() => deps.store.deleteSession(manifest.id));
@@ -185,6 +212,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
         entry.stopReason === undefined &&
         !clock.hasExpired()
       ) {
+        const left = budgetLeft(limits, sum);
+        if (typeof left === 'string') {
+          usedUp = left;
+          break;
+        }
+        budget = left;
         retriesLeft -= 1;
         retried = true;
         notices = [...req.notices, `The harness is trying this run again because the previous attempt failed: ${outcome.error ?? 'unknown error'}`];
@@ -197,7 +230,10 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     let final: AttemptOutcome;
     if (entry.stopReason === 'stop') final = { ...sum, status: 'stopped', error: 'The run was stopped by the user.' };
     else if (entry.stopReason === 'time') final = { ...sum, status: 'limit', error: timeLimitText(limits) };
-    else final = { ...sum, status: last?.status ?? 'failed', error: last?.error, loginFailure: last?.loginFailure ?? false };
+    else if (usedUp !== undefined) {
+      const cause = last?.error === undefined ? '' : `${last.error} `;
+      final = { ...sum, status: 'limit', error: `${cause}The harness did not try the run again, because ${usedUp}` };
+    } else final = { ...sum, status: last?.status ?? 'failed', error: last?.error, loginFailure: last?.loginFailure ?? false };
     final.finalText = last?.finalText ?? '';
     final.sessionId = sessionId;
     if (final.status === 'failed' && sessionNote !== undefined) final.error = `${final.error ?? 'The run failed.'} Note: ${sessionNote}`;
@@ -244,6 +280,8 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     entry: ActiveRun;
     clock: RunClock;
     limits: RunLimits;
+    /** What is left of the step and cost limits for this attempt. */
+    budget: AttemptBudget;
   }
 
   async function attempt(a: AttemptInput): Promise<AttemptOutcome> {
@@ -329,6 +367,8 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     } catch (err) {
       return { ...emptyOutcome(), error: `The run did not start: ${errorText(err)}` };
     }
+    built.options.maxTurns = a.budget.maxSteps;
+    built.options.maxBudgetUsd = a.budget.maxCostUsd;
 
     let endInput: () => void = () => {};
     const inputDone = new Promise<void>((resolve) => {

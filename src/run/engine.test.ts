@@ -654,6 +654,50 @@ describe('status mapping and retry', () => {
     expect(t.calls).toHaveLength(2);
   });
 
+  const failingAfter = (cost: number, turns: number) =>
+    only(initMsg('s1'), resultMsg({ subtype: 'error_during_execution', errors: ['a tool crashed'], cost, turns, sessionId: 's1' }));
+
+  it('gives the retry only what is left of the step limit and the cost limit', async () => {
+    // The SDK's cost for a resumed session includes the earlier attempt (1.5 + 0.25).
+    const t = await setup({ scripts: [failingAfter(1.5, 45), ok('done', 's1', { cost: 1.75, turns: 3 })] });
+    const r = await t.engine.run(chat());
+    expect(t.calls.map((c) => c.options.maxTurns)).toEqual([50, 5]);
+    expect(t.calls[0]?.options.maxBudgetUsd).toBe(2);
+    expect(t.calls[1]?.options.maxBudgetUsd).toBeCloseTo(0.5);
+    expect(r.status).toBe('success');
+    expect(r.retried).toBe(true);
+    expect(r.costUsd).toBeCloseTo(1.75);
+  });
+
+  it('does not retry when the failed attempt used up the steps, and ends with limit', async () => {
+    const t = await setup({ scripts: [failingAfter(0.1, 50), ok()] });
+    const r = await t.engine.run(chat());
+    expect(t.calls).toHaveLength(1);
+    expect(r.status).toBe('limit');
+    expect(r.retried).toBe(false);
+    expect(r.error).toBe('The run failed: a tool crashed The harness did not try the run again, because the run used all of its 50 steps.');
+    expect(t.store.listRuns()[0]?.status).toBe('limit');
+  });
+
+  it('does not retry when the failed attempt used up the cost limit, and ends with limit', async () => {
+    const t = await setup({ scripts: [failingAfter(2.4, 10), ok()] });
+    const r = await t.engine.run(chat());
+    expect(t.calls).toHaveLength(1);
+    expect(r.status).toBe('limit');
+    expect(r.error).toContain('because the run used all of its cost limit of 2 dollars.');
+  });
+
+  it('counts the limits over every attempt when there are several retries', async () => {
+    const t = await setup({
+      scripts: [failingAfter(0.5, 20), failingAfter(1.0, 20), failingAfter(1.5, 5), ok()],
+      config: { retriesAfterFailure: 3 },
+    });
+    const r = await t.engine.run(chat());
+    expect(t.calls.map((c) => c.options.maxTurns)).toEqual([50, 30, 10, 5]);
+    expect(t.calls.map((c) => Number(c.options.maxBudgetUsd?.toFixed(2)))).toEqual([2, 1.5, 1, 0.5]);
+    expect(r.status).toBe('success');
+  });
+
   it('follows retriesAfterFailure', async () => {
     const none = await setup({ scripts: [failing(), ok()], config: { retriesAfterFailure: 0 } });
     expect((await none.engine.run(chat())).status).toBe('failed');

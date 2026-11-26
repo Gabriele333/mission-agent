@@ -10,5 +10,12 @@ export {
   type FileToolName,
   type GateOptions,
 } from './gate.js';
-export { clearStaleApprovals, createApprovalQueue, describeApproval, type ApprovalQueueOptions } from './approvals.js';
+export {
+  clearStaleApprovals,
+  COMMAND_LINE_PREFIX,
+  createApprovalQueue,
+  describeApproval,
+  visibleLine,
+  type ApprovalQueueOptions,
+} from './approvals.js';
 export { checkFilePath, resolveRealPath, type PathAccess, type PathCheck } from './path-rules.js';

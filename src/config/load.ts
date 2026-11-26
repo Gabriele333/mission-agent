@@ -18,11 +18,19 @@ export class ConfigError extends Error {
 
 /** Checks the content of `agent.yaml` and applies the defaults. Throws a ConfigError. */
 export function parseConfig(yamlText: string): AgentConfig {
-  const doc = YAML.parseDocument(yamlText);
-  if (doc.errors.length > 0) {
-    throw new ConfigError(doc.errors.map((e) => `The file is not valid YAML: ${e.message.split('\n')[0]}`));
+  let data: unknown;
+  // The YAML library throws for some files, for example one with too many aliases.
+  // Such an error is reported like any other problem of the file.
+  try {
+    const doc = YAML.parseDocument(yamlText);
+    if (doc.errors.length > 0) {
+      throw new ConfigError(doc.errors.map((e) => `The file is not valid YAML: ${e.message.split('\n')[0]}`));
+    }
+    data = doc.toJS();
+  } catch (err) {
+    if (err instanceof ConfigError) throw err;
+    throw new ConfigError([`The file could not be read as YAML: ${(err instanceof Error ? err.message : String(err)).split('\n')[0]}`]);
   }
-  const data: unknown = doc.toJS();
   if (data === null || data === undefined) throw new ConfigError(['The file is empty. agent_name is required.']);
   if (typeof data !== 'object' || Array.isArray(data)) {
     throw new ConfigError(['The file must be a mapping of keys to values, such as "agent_name: Ada".']);
@@ -46,7 +54,13 @@ export function loadConfig(paths: Paths): LoadedConfig {
   if (!existsSync(paths.agentYaml)) {
     throw new ConfigError([`agent.yaml does not exist in the root folder ${paths.root}.`]);
   }
-  const config = parseConfig(readFileSync(paths.agentYaml, 'utf8'));
+  let text: string;
+  try {
+    text = readFileSync(paths.agentYaml, 'utf8');
+  } catch (err) {
+    throw new ConfigError([`agent.yaml could not be read: ${err instanceof Error ? err.message : String(err)}`]);
+  }
+  const config = parseConfig(text);
   const core = readOptionalText(paths.corePromptFile) ?? DEFAULT_CORE_TEXT;
   return {
     config,

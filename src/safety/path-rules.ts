@@ -26,6 +26,7 @@ export interface MissionAreas {
   /** Undefined when the folder resolves outside the mission's folder. */
   memory?: string;
   data?: string;
+  skills?: string;
 }
 
 const MAX_LINKS = 40;
@@ -92,6 +93,7 @@ export function missionAreas(paths: Paths, missionId: MissionId): MissionAreas {
     manifest: join(mission, 'manifest.yaml'),
     memory: inMission(paths.memoryDir(missionId)),
     data: inMission(paths.dataDir(missionId)),
+    skills: inMission(paths.skillsDir(missionId)),
   };
 }
 

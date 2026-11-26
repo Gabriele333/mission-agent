@@ -77,15 +77,22 @@ export type ParseResult = { ok: true; manifest: Manifest } | { ok: false; errors
 
 /** Same as parseManifest, with messages that do not name the file. */
 export function parseManifestText(yamlText: string): ParseResult {
-  const doc = YAML.parseDocument(yamlText);
-  if (doc.errors.length > 0) {
-    return { ok: false, errors: doc.errors.map((e) => `The file is not valid YAML: ${e.message.split('\n')[0]}`) };
+  // The YAML library throws for some files, for example one with too many aliases.
+  // Any such error belongs to this file only, so it becomes this file's error.
+  try {
+    const doc = YAML.parseDocument(yamlText);
+    if (doc.errors.length > 0) {
+      return { ok: false, errors: doc.errors.map((e) => `The file is not valid YAML: ${e.message.split('\n')[0]}`) };
+    }
+    const data: unknown = doc.toJS();
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+      return { ok: false, errors: ['The file must be a mapping of keys to values, starting with "id:".'] };
+    }
+    return checkManifestData(data);
+  } catch (err) {
+    const text = err instanceof Error ? err.message : String(err);
+    return { ok: false, errors: [`The file could not be read as a manifest: ${text.split('\n')[0]}`] };
   }
-  const data: unknown = doc.toJS();
-  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
-    return { ok: false, errors: ['The file must be a mapping of keys to values, starting with "id:".'] };
-  }
-  return checkManifestData(data);
 }
 
 /** Checks a manifest object, from a file or from code, against the schema. */

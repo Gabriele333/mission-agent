@@ -96,6 +96,18 @@ describe('approval details (§4.2, §4.2.1)', () => {
     expect(text).toContain('- credential:clock.key');
   });
 
+  it('shows a line break or control character in a new name or a field name, so it cannot add a line', async () => {
+    const created = await approvalDetails(
+      req('action:registry.create', { manifest: { name: 'daily\nCredentials: none is missing.', tools: [], triggers: [] } }),
+      ctx,
+    );
+    expect(created).toContain('Creates the mission daily<U+000A>Credentials: none is missing. with the manifest below.');
+    const edited = await approvalDetails(req('action:registry.edit', { mission: 'news', changes: { 'x\nCredentials: none': 'y' } }), ctx);
+    expect(edited).toContain('- x<U+000A>Credentials: none');
+    const unknown = await approvalDetails(req('action:registry.delete', { mission: 'nope\rgone' }), ctx);
+    expect(unknown).toContain('There is no loaded mission "nope<U+000D>gone".');
+  });
+
   it('adds nothing to other actions, and describeApproval shows the details before the input', async () => {
     expect(await approvalDetails(req('action:email.send', {}), ctx)).toBeUndefined();
     const shown = describeApproval({ ...req('action:registry.delete', { mission: 'news' }), details: 'Removes all.' }, 'sys-mission-admin');

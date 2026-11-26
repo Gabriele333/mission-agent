@@ -144,24 +144,29 @@ export function createMissionRegistry(options: MissionRegistryOptions): Watching
         }
         continue;
       }
-      const text = readFileSync(file, 'utf8');
-      const parsed = parseManifestText(text);
-      if (!parsed.ok) {
-        for (const message of parsed.errors) errors.push({ source, message });
-        continue;
+      // An error in one file, of any kind, stops only that mission (§A.4, §H).
+      try {
+        const text = readFileSync(file, 'utf8');
+        const parsed = parseManifestText(text);
+        if (!parsed.ok) {
+          for (const message of parsed.errors) errors.push({ source, message });
+          continue;
+        }
+        const m = parsed.manifest;
+        const problems: string[] = [];
+        if (m.id !== dir) problems.push(`id "${m.id}" must be the same as the folder name "${dir}".`);
+        if (CODE_ONLY_SYSTEM_IDS.includes(m.id) || codeIds.has(m.id)) {
+          problems.push(`The manifest of ${m.id} is part of the harness code. This file is not used.`);
+        }
+        problems.push(...validateManifest(m, ctx()));
+        if (problems.length > 0) {
+          for (const message of problems) errors.push({ source, message });
+          continue;
+        }
+        candidates.push({ manifest: m, source, file: { path: file, text } });
+      } catch (err) {
+        errors.push({ source, message: `The file could not be read: ${err instanceof Error ? err.message : String(err)}` });
       }
-      const m = parsed.manifest;
-      const problems: string[] = [];
-      if (m.id !== dir) problems.push(`id "${m.id}" must be the same as the folder name "${dir}".`);
-      if (CODE_ONLY_SYSTEM_IDS.includes(m.id) || codeIds.has(m.id)) {
-        problems.push(`The manifest of ${m.id} is part of the harness code. This file is not used.`);
-      }
-      problems.push(...validateManifest(m, ctx()));
-      if (problems.length > 0) {
-        for (const message of problems) errors.push({ source, message });
-        continue;
-      }
-      candidates.push({ manifest: m, source, file: { path: file, text } });
     }
     return { candidates, errors };
   }

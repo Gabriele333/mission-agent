@@ -97,6 +97,35 @@ describe('reload', () => {
     ]);
   });
 
+  it('reports a manifest with too many YAML aliases as its own error and loads the other missions', () => {
+    writeMission(EXAMPLE_ID, EXAMPLE_YAML);
+    const bad = 'm_aaaaaaaaaaaa';
+    writeMission(bad, `id: ${bad}\nname: &a bad-one\ny: [${Array.from({ length: 150 }, () => '*a').join(', ')}]\n`);
+    expect(() => registry.reload()).not.toThrow();
+    expect(registry.get(EXAMPLE_ID)?.name).toBe('inbox-curator');
+    expect(registry.get(bad)).toBeUndefined();
+    expect(registry.errors()).toEqual([
+      {
+        source: `missions/${bad}/manifest.yaml`,
+        message: 'The file could not be read as a manifest: Excessive alias count indicates a resource exhaustion attack',
+      },
+    ]);
+    // Creating and editing other missions still works, because both start with a scan.
+    expect(() => registry.edit(EXAMPLE_ID, { description: 'Changed' })).not.toThrow();
+    expect(registry.create(draft()).name).toBe('news-curator');
+  });
+
+  it('reports a manifest that cannot be read as its own error', () => {
+    writeMission(EXAMPLE_ID, EXAMPLE_YAML);
+    const bad = 'm_aaaaaaaaaaaa';
+    // A folder in place of the file makes the read fail with EISDIR.
+    mkdirSync(join(paths.missionDir(bad), 'manifest.yaml'), { recursive: true });
+    expect(() => registry.reload()).not.toThrow();
+    expect(registry.get(EXAMPLE_ID)).toBeDefined();
+    expect(registry.errors()).toHaveLength(1);
+    expect(registry.errors()[0]?.message).toMatch(/^The file could not be read: EISDIR/);
+  });
+
   it('needs the folder name to equal the id', () => {
     writeMission('m_2vx8qm4rt6pc', EXAMPLE_YAML);
     registry.reload();
