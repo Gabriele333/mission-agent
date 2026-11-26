@@ -10,7 +10,7 @@ import type {
   ToolDefinition,
 } from '../types.js';
 import { checkMemoryContent, contentAfterEdit, memoryFileKind } from './memory-limits.js';
-import { checkFilePath, errorText, isInside, missionAreas, type MissionAreas, type PathAccess } from './path-rules.js';
+import { checkFilePath, errorText, missionAreas, type PathAccess } from './path-rules.js';
 
 /** The SDK's file tools. The gate applies the path rules of §E.2.1 to these, never gates. */
 export const FILE_TOOL_NAMES = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'] as const;
@@ -104,29 +104,7 @@ export function createGate(options: GateOptions): Gate {
       const globError = checkPattern('glob', input.glob);
       if (globError) return deny(`Grep is refused: ${globError}`);
     }
-    const raw = input.path ?? '.';
-    if (typeof raw !== 'string' || raw === '') return deny('Grep is refused: the path is not a text.');
-    const result = checkFilePath(paths, manifest.id, raw, 'read');
-    if (!result.ok) return deny(result.message);
-    // Grep reads file contents. A search that starts at the mission folder itself would also
-    // read manifest.yaml, and no check of the glob can be sure to keep it out, because the
-    // glob is read by ripgrep with its own rules. So Grep may start only inside the folders
-    // that hold no manifest. Ripgrep does not follow symbolic links inside those folders.
-    let areas: MissionAreas;
-    try {
-      areas = missionAreas(paths, manifest.id);
-    } catch (err) {
-      return deny(`Grep is refused: the path could not be checked (${errorText(err)}).`);
-    }
-    const roots = [areas.memory, areas.data, areas.skills, areas.core].filter((p): p is string => p !== undefined);
-    if (!roots.some((root) => isInside(result.realPath, root))) {
-      return deny(
-        `Grep is refused for "${raw}": Grep can search only inside the memory, data or skills folder ` +
-          'of this mission, or the core folder, because a search of the mission folder itself would ' +
-          'also read manifest.yaml. Set the path field to one of those folders, for example "memory".',
-      );
-    }
-    return { decision: 'allow' };
+    return pathDecision('Grep', input.path ?? '.', 'read', manifest);
   }
 
   function checkWrite(input: Record<string, unknown>, manifest: Manifest): GateDecision {

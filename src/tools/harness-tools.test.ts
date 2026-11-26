@@ -51,7 +51,9 @@ describe('send_message', () => {
   it('refuses the manifest and a file in core/', async () => {
     put(join(h.paths.coreDir, 'facts.txt'));
     const manifest = await sendMessage(ctx, h.paths, { text: 'M', file: 'manifest.yaml' });
-    expect(textOf(manifest)).toMatch(/cannot read its manifest.yaml/);
+    // A mission may read its manifest, but the message tool sends only files of the data folder.
+    expect(manifest.isError).toBe(true);
+    expect(textOf(manifest)).toMatch(/not inside this mission's data\/ folder/);
     const core = await sendMessage(ctx, h.paths, { text: 'C', file: join(h.paths.coreDir, 'facts.txt') });
     expect(core.isError).toBe(true);
     expect(h.host.sent).toEqual([]);
@@ -115,7 +117,7 @@ describe('delete_file', () => {
   });
 
   it('refuses manifest.yaml, also through ..', async () => {
-    for (const path of ['manifest.yaml', 'data/../manifest.yaml', h.paths.manifestFile(ID)]) {
+    for (const path of ['manifest.yaml', 'data/../manifest.yaml', h.paths.manifestFile(ID), 'MANIFEST.YAML', 'memory/../Manifest.Yaml']) {
       const result = await deleteFile(ctx, h.paths, { path });
       expect(result.isError).toBe(true);
       expect(textOf(result)).toMatch(/can delete only files inside its own memory\/ and data\/ folders/);

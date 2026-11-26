@@ -181,12 +181,33 @@ describe('file tools: reading', () => {
     expectAllow(check('Read', { file_path: real }));
   });
 
-  it('refuses manifest.yaml by every route', () => {
-    expectDeny(check('Read', { file_path: 'manifest.yaml' }), /manifest\.yaml/);
-    expectDeny(check('Read', { file_path: './memory/../manifest.yaml' }));
-    expectDeny(check('Read', { file_path: paths.manifestFile(ID) }));
-    expectDeny(check('Read', { file_path: 'data/link-manifest' }));
-    expectDeny(check('Read', { file_path: 'MANIFEST.YAML' }));
+  it('allows the mission to read its own manifest.yaml (§E.2.1)', () => {
+    expectAllow(check('Read', { file_path: 'manifest.yaml' }));
+    expectAllow(check('Read', { file_path: './memory/../manifest.yaml' }));
+    expectAllow(check('Read', { file_path: paths.manifestFile(ID) }));
+    expectAllow(check('Read', { file_path: 'data/link-manifest' }));
+  });
+
+  it('refuses the manifest of another mission by every path spelling', () => {
+    const spellings = [
+      paths.manifestFile(OTHER),
+      realpathSync(paths.manifestFile(OTHER)),
+      '../m_abcd/manifest.yaml',
+      './memory/../../m_abcd/manifest.yaml',
+      'data/../../m_abcd/./manifest.yaml',
+      '../m_abc/../m_abcd/manifest.yaml',
+      'data/link-other/manifest.yaml',
+      'data/link-other/memory/../manifest.yaml',
+      'memory/sub-other/../manifest.yaml',
+      `${mission}d/manifest.yaml`,
+    ];
+    for (const file_path of spellings) {
+      expectDeny(check('Read', { file_path }), /only its own folder/);
+      expectDeny(check('Grep', { pattern: 'id', path: file_path }));
+      expectDeny(check('Glob', { pattern: '*', path: file_path }));
+    }
+    expectDeny(check('Grep', { pattern: 'id', path: '.', glob: '../m_abcd/manifest.yaml' }), /\.\./);
+    expectDeny(check('Glob', { pattern: '../m_abcd/manifest.yaml' }), /\.\./);
   });
 
   it('refuses other missions, including one whose id starts with this id', () => {
@@ -230,7 +251,8 @@ describe('file tools: reading', () => {
     expectDeny(check('Glob', { pattern: '*', path: 'data/link-etc' }));
     expectAllow(check('Grep', { pattern: 'hello', path: 'memory' }));
     expectDeny(check('Grep', { pattern: 'hello', path: '../m_abcd' }));
-    expectDeny(check('Grep', { pattern: 'id', path: 'manifest.yaml' }));
+    expectDeny(check('Grep', { pattern: 'hello', path: '..' }));
+    expectDeny(check('Grep', { pattern: 'hello', path: 'data/link-etc' }));
   });
 
   it('refuses a Glob pattern or Grep glob that is absolute or climbs out', () => {
@@ -246,35 +268,30 @@ describe('file tools: reading', () => {
     expectAllow(check('Grep', { pattern: 'a..b', path: 'memory' }));
   });
 
-  it('refuses a Grep that starts at the mission folder itself, whatever the glob', () => {
-    expectDeny(check('Grep', { pattern: 'gate' }), /memory, data or skills/);
-    expectDeny(check('Grep', { pattern: 'gate', path: '.' }));
-    expectDeny(check('Grep', { pattern: 'gate', path: mission }));
-    expectDeny(check('Grep', { pattern: 'gate', path: 'memory/..' }));
-    expectDeny(check('Grep', { pattern: 'gate', path: realpathSync(mission) }));
-    // Globs that ripgrep matches to manifest.yaml but Node's glob matcher does not.
-    for (const glob of ['manifest\\.yaml', 'manifest.{yaml}', 'manifest.yam{l}', '{manifest.yaml}', '*.md', '*.{md,txt}', '!*.md']) {
-      expectDeny(check('Grep', { pattern: 'gate', glob }));
-      expectDeny(check('Grep', { pattern: 'gate', path: '.', glob }));
+  it('allows Grep and Glob at the mission folder itself, with any glob, manifest.yaml included', () => {
+    expectAllow(check('Grep', { pattern: 'gate' }));
+    expectAllow(check('Grep', { pattern: 'gate', path: '.' }));
+    expectAllow(check('Grep', { pattern: 'gate', path: mission }));
+    expectAllow(check('Grep', { pattern: 'gate', path: 'memory/..' }));
+    expectAllow(check('Grep', { pattern: 'gate', path: realpathSync(mission) }));
+    for (const glob of ['manifest.yaml', 'manifest\\.yaml', 'manifest.{yaml}', '*.yaml', '*.md', '*.{md,txt}', '!*.md']) {
+      expectAllow(check('Grep', { pattern: 'gate', glob }));
+      expectAllow(check('Grep', { pattern: 'gate', path: '.', glob }));
     }
-    expectDeny(check('Grep', { pattern: 'id', path: 'data/link-manifest' }), /manifest\.yaml/);
+    expectAllow(check('Grep', { pattern: 'id', path: 'manifest.yaml' }));
+    expectAllow(check('Grep', { pattern: 'id', path: 'data/link-manifest' }));
+    expectAllow(check('Glob', { pattern: '*' }));
+    expectAllow(check('Glob', { pattern: 'manifest.yaml' }));
+    expectAllow(check('Glob', { pattern: '**/*', path: mission }));
   });
 
   it('allows a Grep inside memory, data, skills and core, with or without a glob', () => {
-    expectAllow(check('Grep', { pattern: 'hello', path: 'memory' }));
     expectAllow(check('Grep', { pattern: 'hello', path: 'memory/note.md' }));
     expectAllow(check('Grep', { pattern: 'hello', path: paths.memoryDir(ID), glob: '*.md' }));
     expectAllow(check('Grep', { pattern: 'x', path: 'data', glob: '*.{txt,csv}' }));
     expectAllow(check('Grep', { pattern: 'x', path: './skills' }));
-    expectAllow(check('Grep', { pattern: 'x', path: 'skills/s' }));
     expectAllow(check('Grep', { pattern: 'Sam', path: paths.coreDir }));
     expectAllow(check('Grep', { pattern: 'Sam', path: paths.coreMemoryFile }));
-  });
-
-  it('allows Glob on the mission folder, because Glob lists names and reads no content', () => {
-    expectAllow(check('Glob', { pattern: '*' }));
-    expectAllow(check('Glob', { pattern: 'manifest.yaml' }));
-    expectAllow(check('Glob', { pattern: '**/*', path: mission }));
   });
 });
 
@@ -285,6 +302,29 @@ describe('file tools: writing', () => {
     expectAllow(check('Write', { file_path: join(paths.dataDir(ID), 'report.pdf'), content: 'x' }));
     expectAllow(check('Edit', { file_path: 'data/file.txt', old_string: 'x', new_string: 'y' }));
     expectAllow(check('NotebookEdit', { notebook_path: 'data/n.ipynb', new_source: 'print(1)' }));
+  });
+
+  it('refuses every write to manifest.yaml, by every route', () => {
+    const routes = [
+      'manifest.yaml',
+      './manifest.yaml',
+      paths.manifestFile(ID),
+      realpathSync(paths.manifestFile(ID)),
+      'memory/../manifest.yaml',
+      'data/../manifest.yaml',
+      'data/link-manifest',
+      'skills/../manifest.yaml',
+      '../m_abc/manifest.yaml',
+      'MANIFEST.YAML',
+      'Manifest.Yaml',
+      'data/../MANIFEST.yaml',
+    ];
+    for (const file_path of routes) {
+      expectDeny(check('Write', { file_path, content: 'x' }), /memory\/ and data\//);
+      expectDeny(check('Edit', { file_path, old_string: 'a', new_string: 'b' }));
+      expectDeny(check('NotebookEdit', { notebook_path: file_path, new_source: 'x' }));
+    }
+    expectDeny(check('Write', { file_path: paths.manifestFile(OTHER), content: 'x' }));
   });
 
   it('refuses the manifest, skills, core, the mission folder and other missions', () => {
@@ -321,7 +361,11 @@ describe('file tools: writing', () => {
       expectAllow(check('Write', { file_path: 'MEMORY/note.md', content: 'x' }));
       expectAllow(check('Write', { file_path: '../M_ABC/DATA/file.txt', content: 'x' }));
       expectDeny(check('Write', { file_path: '../M_ABCD/data/file.txt', content: 'x' }));
-      expectDeny(check('Read', { file_path: '../M_ABC/Manifest.Yaml' }));
+      expectAllow(check('Read', { file_path: '../M_ABC/Manifest.Yaml' }));
+      expectDeny(check('Read', { file_path: '../M_ABCD/Manifest.Yaml' }));
+      expectDeny(check('Write', { file_path: '../M_ABC/Manifest.Yaml', content: 'x' }));
+      expectDeny(check('Write', { file_path: 'MANIFEST.YAML', content: 'x' }));
+      expectDeny(check('Edit', { file_path: 'DATA/../Manifest.yaml', old_string: 'a', new_string: 'b' }));
     },
   );
 });

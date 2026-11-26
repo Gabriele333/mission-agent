@@ -1,6 +1,6 @@
 import { lstatSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, parse, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, sep } from 'node:path';
 import type { Paths } from '../paths.js';
 import type { MissionId } from '../types.js';
 
@@ -22,11 +22,9 @@ export type PathCheck =
 export interface MissionAreas {
   mission: string;
   core: string;
-  manifest: string;
   /** Undefined when the folder resolves outside the mission's folder. */
   memory?: string;
   data?: string;
-  skills?: string;
 }
 
 const MAX_LINKS = 40;
@@ -35,8 +33,9 @@ const MAX_LINKS = 40;
  * Resolves a path the way the operating system would: relative to `baseDir`,
  * following each symbolic link where it appears, and applying `..` after the
  * link is followed. Parts that do not exist yet are kept as given.
- * Existing parts get the letter case they have on disk, so a case-insensitive
- * file system cannot hide `MANIFEST.YAML` from a string comparison.
+ * Existing parts get the letter case they have on disk, so on a case-insensitive
+ * file system a spelling such as `../M_OTHER/DATA` cannot pass a string comparison
+ * that the real folder would fail.
  * Throws on a loop of links, on a `~user` path and on any file system error other than a missing file.
  */
 export function resolveRealPath(input: string, baseDir: string): string {
@@ -90,17 +89,16 @@ export function missionAreas(paths: Paths, missionId: MissionId): MissionAreas {
   return {
     mission,
     core: resolveRealPath(paths.coreDir, sep),
-    manifest: join(mission, 'manifest.yaml'),
     memory: inMission(paths.memoryDir(missionId)),
     data: inMission(paths.dataDir(missionId)),
-    skills: inMission(paths.skillsDir(missionId)),
   };
 }
 
 /**
  * Checks one path against the rules of §E.2.1.
- * Read: the mission's own folder and `core/`, but not the mission's `manifest.yaml`.
- * Write: only inside the mission's `memory/` and `data/` folders.
+ * Read: the mission's own folder, its `manifest.yaml` included, and `core/`.
+ * Write: only inside the mission's `memory/` and `data/` folders, so never `manifest.yaml`,
+ * `skills/` or `core/`.
  */
 export function checkFilePath(paths: Paths, missionId: MissionId, input: string, access: PathAccess): PathCheck {
   const verb = access === 'read' ? 'Reading' : 'Writing';
@@ -126,9 +124,6 @@ export function checkFilePath(paths: Paths, missionId: MissionId, input: string,
     };
   }
 
-  if (isManifest(real, areas)) {
-    return { ok: false, message: `Reading "${input}" is refused: a mission cannot read its manifest.yaml file.` };
-  }
   if (isInside(real, areas.mission) || isInside(real, areas.core)) {
     return { ok: true, realPath: real, inMemory };
   }
@@ -136,11 +131,6 @@ export function checkFilePath(paths: Paths, missionId: MissionId, input: string,
     ok: false,
     message: `Reading "${input}" is refused: a mission can read only its own folder and the core folder.${where}`,
   };
-}
-
-/** True when the real path is the mission's manifest. The name is compared without case. */
-export function isManifest(real: string, areas: Pick<MissionAreas, 'mission'>): boolean {
-  return dirname(real) === areas.mission && basename(real).toLowerCase() === 'manifest.yaml';
 }
 
 function segments(p: string): string[] {
