@@ -57,7 +57,13 @@ This document specifies the harness of a mission-driven personal agent.
   - [5.2 Changes after setup](#52-changes-after-setup)
   - [5.3 Moving the agent to another machine](#53-moving-the-agent-to-another-machine)
 - [6 Dashboard](#6-dashboard)
-- [7 Future developments](#7-future-developments)
+- [7 Installation and updates](#7-installation-and-updates)
+  - [7.1 Releases](#71-releases)
+  - [7.2 Installation](#72-installation)
+  - [7.3 Data format](#73-data-format)
+  - [7.4 Update](#74-update)
+  - [7.5 A user's own tools and triggers](#75-a-users-own-tools-and-triggers)
+- [8 Future developments](#8-future-developments)
 
 ## 1 The struggles of a long-lived agent
 
@@ -459,7 +465,7 @@ After the first word, an id uses lowercase letters, digits and underscores, with
 
 **Status (§A.4.3).** Either `active` or `frozen`. A new mission is `active`. A frozen mission does not run, and its folder is kept. The harness reads it from the mission registry to decide which missions load.
 
-**Lifecycle.** Four operations on a mission, done through the mission admin: create, edit, freeze and delete ([Mission management](#421-mission-management)). *Create* makes the mission's folder and writes its manifest. *Edit* changes the manifest, and the harness then increases its version (§A.4.2). *Freeze* sets its status to `frozen`. The same operation sets a frozen mission back to `active`. *Delete* removes the mission and what belongs only to it ([Mission management](#421-mission-management)). A manifest can also be edited manually. Transfer to another agent is planned for a later version ([Future developments](#7-future-developments)).
+**Lifecycle.** Four operations on a mission, done through the mission admin: create, edit, freeze and delete ([Mission management](#421-mission-management)). *Create* makes the mission's folder and writes its manifest. *Edit* changes the manifest, and the harness then increases its version (§A.4.2). *Freeze* sets its status to `frozen`. The same operation sets a frozen mission back to `active`. *Delete* removes the mission and what belongs only to it ([Mission management](#421-mission-management)). A manifest can also be edited manually. Transfer to another agent is planned for a later version ([Future developments](#8-future-developments)).
 
 **Instructions (§A.4.6).** Free text in the `context` section, which the model reads as part of the system prompt (§C.1). It describes the mission: what it is, what it is for, and what a good result is. The task for a given run is not here. It arrives as the run's input (§C.4), from a user message or a trigger (§B.2). The text is the same on every run, so the prompt cache stays valid. The maximum length is 4,000 characters. The registry rejects a manifest with longer instructions.
 
@@ -501,7 +507,7 @@ Gates match on the action id (§D.3). Two tools can declare the same action id, 
 | Mission registry                      | `tool:mission_registry` | The mission admin only                           | Every change (§D.3)                               |
 | Promotion staging                     | `tool:promotion_stage`  | The general mission and the self-improve mission | What it stages waits in the approval queue (§I.3) |
 
-Every other tool, such as `tool:gmail` in the example of §A.4, is added by a developer.
+Every other tool, such as `tool:gmail` in the example of §A.4, is added by a developer. A tool that comes with a release is part of the program. A user's own tool is in the `tools/` folder of the agent's root (chapter 7.5).
 
 **Credentials.** A credential is a secret value that the harness, a tool or a trigger needs, such as a key or a token. This part assumes macOS. Every credential has an id of the form `credential:<owner>.<name>` (§A.4). The harness has two of its own: the model credential when the model login is `api_key`, and `credential:telegram.bot_token` when Telegram is used (§F.1). A declaration names the credentials that a tool or a trigger needs, never their values. Each credential allows as little as its tool needs, and the user can revoke it.
 
@@ -591,7 +597,7 @@ A trigger has two functions, start and stop. When it sees an event, it gives the
 - One line in plain words that says what happened.
 - A small data part, such as a message id.
 
-Each trigger has its own folder inside the harness, with its code and a declaration. The declaration states which parameters a subscription can set, for example the time of a timer, and the names of the credentials the trigger needs (§A.5). A trigger never calls the model.
+Each trigger has its own folder inside the harness, with its code and a declaration. The declaration states which parameters a subscription can set, for example the time of a timer, and the names of the credentials the trigger needs (§A.5). A trigger never calls the model. A user's own trigger is in the `triggers/` folder of the agent's root (chapter 7.5).
 
 Two triggers come with the harness. `trigger:cron` fires on a schedule. `trigger:chat` fires when a chat message is assigned to the mission, by its Telegram thread (§F.1) or by triage (§B.3). A mission that does not list `trigger:chat` never receives chat messages.
 
@@ -751,11 +757,13 @@ state/                 ← written by the harness only; no run can read here
   agent.db             ← the database: logbook, signal records and harness state (§E.2.2)
   claude/              ← the SDK's configuration folder, which holds the sessions (§3.3)
   server               ← the port and the token of the local connection, written at each start (§J.3)
+tools/                 ← the user's own tools, one folder per tool; no run can read here (chapter 7.5)
+triggers/              ← the user's own triggers, one folder per trigger; no run can read here (chapter 7.5)
 ```
 
 The working directory of a run is the active mission's own folder. A run reads its own folder and `core/`, and writes only to the `memory/` and `data/` subfolders of its own folder. The hook refuses any write to `manifest.yaml` (§E.2.1).
 
-A mission's folder holds its manifest, its memory, its skills and its data. Transfer to another agent is planned for a later version ([Future developments](#7-future-developments)).
+A mission's folder holds its manifest, its memory, its skills and its data. Transfer to another agent is planned for a later version ([Future developments](#8-future-developments)).
 
 A note in `memory/` is provisional until the next self-improvement pass (§I.1). Two things can then happen to it:
 
@@ -1218,7 +1226,60 @@ The dashboard only reads. It changes nothing. The user answers an approval in th
 
 ---
 
-## 7 Future developments
+## 7 Installation and updates
+
+The program and the agent's data are in two places. The program is the installed harness. The data is the agent's root folder (§E.2.3). An update replaces the program. It changes the root folder only through a migration (chapter 7.3).
+
+### 7.1 Releases
+
+- A release is a version number in the program and a git tag with the same number, such as `v0.2.0`. Users install releases only, never the development branch.
+- Each release has notes. They say what changed and whether the data format changed.
+- Each release names one exact version of the Claude Agent SDK, because the harness depends on tested SDK behaviour (§3.3).
+- Before a release, the unit tests and the tests with the real model must pass.
+
+### 7.2 Installation
+
+The user installs one release with one command of the package manager. The user then chooses the agent's root folder and runs the `setup` command with it ([chapter 5](#5-setup-page)). The harness never chooses the root folder of a service: the `service` commands need the path (§H).
+
+A developer of the harness installs a release in the same way, apart from the development copy. A development run uses a test root folder, never the root folder of a real agent.
+
+### 7.3 Data format
+
+- The root folder has one format number, stored in `agent.yaml` as `format`. The database has its own schema number (§E.2.2).
+- Each program version knows one format number. At a start, a program with a higher number migrates the root folder, one step per number. A program with a lower number refuses to start and says which version is needed.
+- A migration goes one way. The copy made before an update is the only way back (chapter 7.4).
+
+### 7.4 Update
+
+The `update` command of the harness program updates the installed program. It does these steps in order:
+
+1. It looks for a newer release, and shows its version and its notes.
+2. It asks the user to confirm.
+3. It stops the harness.
+4. It copies the agent's root folder to `backups/update/<old version>-<date>/`, without the `backups/` folder itself. It keeps the last 2 copies (placeholder).
+5. It installs the new release.
+6. It starts the harness, which migrates the data when the format number is higher (chapter 7.3).
+7. It checks that the harness answers and reports the new version.
+8. If a step from 5 to 7 fails, it installs the old release again, puts the copy back, starts the harness and tells the user.
+
+The harness never updates itself. An update is new code with access to the user's credentials and tools, so a person starts it. Once a day the harness looks for a newer release, and tells the user in the chat when one exists. That check sends nothing about the user.
+
+The service file names a path of the program that is the same for every version, so it stays valid after an update (§H).
+
+### 7.5 A user's own tools and triggers
+
+An update replaces every file of the program, so code that a user adds cannot be there. It is in two folders of the agent's root (§E.2.3): `tools/` for the user's own tools, and `triggers/` for the user's own triggers. Six rules apply:
+
+- The harness loads these folders at each start, after the tools and triggers that come with it. It refuses an id that already exists.
+- Each one has the same parts as one that comes with the harness: its code and its declaration (§A.5, §B.2).
+- Each declaration states the number of the tool or trigger format it was written for. The harness refuses one with another number and tells the user. A mission that lists it does not load until it is updated (§A.4).
+- This code runs inside the harness, with the harness's own access. The harness does not isolate it. The user installs it at their own risk.
+- No run can read or write these folders (§E.2.1). The mission admin writes no code, so it cannot add one ([Mission admin](#42-mission-admin)).
+- The folders hold no secret value. A declaration names the credentials, and the values are in the Keychain (§A.5).
+
+---
+
+## 8 Future developments
 
 Stuff that I've considered but not developed yet:
 
@@ -1226,7 +1287,7 @@ Stuff that I've considered but not developed yet:
 
 - full observability stack (using OSS for now)
 
-- backup, update and a health check command
+- a backup command and a health check command
 
 - status and cost commands in the chat, since the dashboard is local only
 

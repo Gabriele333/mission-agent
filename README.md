@@ -30,6 +30,7 @@ Not built yet:
 
 - The self-improvement loop of the design (chapter I), signals and the rating buttons.
 - Any tool for an outside system, such as mail or a calendar. A developer adds a tool as code (design, §A.5).
+- The `update` command, the data format number, and the `tools/` and `triggers/` folders for a user's own code (design, chapter 7).
 
 ## Requirements
 
