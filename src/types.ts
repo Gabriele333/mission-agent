@@ -132,6 +132,11 @@ export interface MissionRegistry {
   stopWatching(): void;
   /** The four operations of the mission admin (§4.2.1). Each one validates before it writes. */
   create(draft: ManifestDraft): Manifest;
+  /**
+   * Adds a mission that comes with its own id and files, such as one of the mission library.
+   * `sourceDir` holds its `manifest.yaml`, and optionally a `README.md` and a `skills/` folder.
+   */
+  install(sourceDir: string): Manifest;
   edit(id: MissionId, patch: Partial<ManifestDraft>): Manifest;
   setStatus(id: MissionId, status: MissionStatus): Manifest;
   /** Removes the mission's folder. The caller removes the session, the approvals and the thread. */

@@ -1,6 +1,7 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { EFFORTS } from '../config/index.js';
+import { findLibraryMission, readLibrary, type Library } from '../library/index.js';
 import {
   GATE_KINDS,
   isValidMissionId,
@@ -22,6 +23,7 @@ import {
   type ToolDefinition,
   type TriggerDefinition,
 } from '../types.js';
+import { libraryDir as programLibraryDir } from '../program.js';
 import { mcpToolName, MISSION_REGISTRY_SERVER, MISSION_REGISTRY_TOOL_ID, REGISTRY_ACTION_IDS, REGISTRY_TOOLS } from './ids.js';
 import { errorResult, errorText, okResult, type ToolResult } from './results.js';
 
@@ -33,6 +35,8 @@ export interface MissionRegistryToolDeps {
   catalog: () => ToolCatalog;
   /** Read when `list_catalog` runs. */
   triggers: () => readonly TriggerDefinition[];
+  /** The folder of the mission library. Default: the one that comes with the program. */
+  libraryDir?: () => string;
 }
 
 // ---------------------------------------------------------------- input shapes
@@ -123,6 +127,10 @@ export const freezeMissionShape = {
 };
 
 export const missionRefShape = { mission: missionRef };
+
+const libraryRef = z.string().min(1).describe('The name of a mission of the mission library, as list_library shows it, such as "morning-news".');
+
+export const libraryMissionShape = { library_mission: libraryRef };
 
 type CreateArgs = z.infer<z.ZodObject<typeof createMissionShape>>;
 type EditArgs = z.infer<z.ZodObject<typeof editMissionShape>>;
@@ -348,6 +356,75 @@ export async function deleteMission(ctx: ToolContext, args: { mission: string })
   );
 }
 
+// ---------------------------------------------------------------- the mission library
+
+type LibraryRead = { ok: true; library: Library } | { ok: false; result: ToolResult };
+
+function openLibrary(deps: MissionRegistryToolDeps): LibraryRead {
+  try {
+    return { ok: true, library: readLibrary((deps.libraryDir ?? programLibraryDir)()) };
+  } catch (err) {
+    return { ok: false, result: errorResult(`The mission library cannot be read: ${errorText(err)}`) };
+  }
+}
+
+export function listLibrary(ctx: ToolContext, deps: MissionRegistryToolDeps): ToolResult {
+  const opened = openLibrary(deps);
+  if (!opened.ok) return opened.result;
+  const registry = ctx.host.registry;
+  const missions = opened.library.missions.map((m) => ({
+    name: m.folder,
+    description: m.manifest.description,
+    triggers: m.manifest.triggers,
+    tools: m.manifest.tools,
+    // A mission of the library keeps its id, so the id tells whether this agent has it.
+    inThisAgent: registry.get(m.manifest.id) !== undefined,
+  }));
+  return okResult(
+    json({
+      missions,
+      problems: opened.library.problems,
+      note:
+        'These are published missions that come with the harness. They are not part of this agent until one is added. ' +
+        `${REGISTRY_TOOLS.readLibraryMission} returns the full manifest of one. ${REGISTRY_TOOLS.addLibraryMission} adds one as it is published.`,
+    }),
+  );
+}
+
+export function readLibraryMission(deps: MissionRegistryToolDeps, args: { library_mission: string }): ToolResult {
+  const opened = openLibrary(deps);
+  if (!opened.ok) return opened.result;
+  const found = findLibraryMission(opened.library, args.library_mission);
+  if (found === undefined) {
+    return errorResult(`The mission library has no mission "${args.library_mission}". Call ${REGISTRY_TOOLS.listLibrary} to see the missions.`);
+  }
+  return okResult(json({ manifest: found.manifest, skills: found.skills, readme: found.readme ?? '' }));
+}
+
+export async function addLibraryMission(
+  ctx: ToolContext,
+  deps: MissionRegistryToolDeps,
+  args: { library_mission: string },
+): Promise<ToolResult> {
+  const opened = openLibrary(deps);
+  if (!opened.ok) return opened.result;
+  const found = findLibraryMission(opened.library, args.library_mission);
+  if (found === undefined) {
+    return errorResult(`The mission library has no mission "${args.library_mission}". Call ${REGISTRY_TOOLS.listLibrary} to see the missions.`);
+  }
+  let added: Manifest;
+  try {
+    added = ctx.host.registry.install(found.dir);
+  } catch (err) {
+    return registryError(err, 'The mission');
+  }
+  const notice = await notifyChanged(ctx, added.id);
+  return okResult(
+    `Added the mission ${added.name} from the mission library, with id ${added.id}, version ${added.version}. ` +
+      `It now belongs to this agent, and it can be edited like any other mission.${notice}`,
+  );
+}
+
 // ---------------------------------------------------------------- tool definition
 
 /** Shown with each change operation, so the model writes the input for the user who approves it. */
@@ -399,6 +476,26 @@ export function missionRegistrySdkTools(ctx: ToolContext, deps: MissionRegistryT
       missionRefShape,
       (args) => deleteMission(ctx, args),
     ),
+    listLibrary: tool(
+      REGISTRY_TOOLS.listLibrary,
+      'Lists the missions of the mission library: published missions that come with the harness and that the user can add to this agent. ' +
+        'Each one has a name, a description, its triggers and tools, and whether this agent already has it.',
+      {},
+      async () => listLibrary(ctx, deps),
+    ),
+    readLibraryMission: tool(
+      REGISTRY_TOOLS.readLibraryMission,
+      'Returns the full manifest of one mission of the mission library, the names of its skills, and the text that its author wrote about it.',
+      libraryMissionShape,
+      async (args) => readLibraryMission(deps, args),
+    ),
+    addLibraryMission: tool(
+      REGISTRY_TOOLS.addLibraryMission,
+      'Adds one mission of the mission library to this agent, as it is published: its manifest, with the id written in it, and its skills. ' +
+        'The call waits for the user\'s approval, and the user sees the whole manifest.',
+      libraryMissionShape,
+      (args) => addLibraryMission(ctx, deps, args),
+    ),
   };
 }
 
@@ -416,6 +513,10 @@ export function missionRegistryTool(deps: MissionRegistryToolDeps): ToolDefiniti
       { sdkToolName: name(REGISTRY_TOOLS.editMission), action: REGISTRY_ACTION_IDS.edit, effect: 'change' },
       { sdkToolName: name(REGISTRY_TOOLS.freezeMission), action: REGISTRY_ACTION_IDS.freeze, effect: 'change' },
       { sdkToolName: name(REGISTRY_TOOLS.deleteMission), action: REGISTRY_ACTION_IDS.delete, effect: 'change' },
+      { sdkToolName: name(REGISTRY_TOOLS.listLibrary), action: REGISTRY_ACTION_IDS.libraryList, effect: 'read' },
+      { sdkToolName: name(REGISTRY_TOOLS.readLibraryMission), action: REGISTRY_ACTION_IDS.libraryRead, effect: 'read' },
+      // Adding a published mission creates a mission, so it is the create action and waits for approval (§4.2).
+      { sdkToolName: name(REGISTRY_TOOLS.addLibraryMission), action: REGISTRY_ACTION_IDS.create, effect: 'change' },
     ],
     credentials: [],
     reservedFor: [...RESERVED_FOR],

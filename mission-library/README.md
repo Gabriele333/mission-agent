@@ -2,25 +2,28 @@
 
 Missions that people publish for others to use. Each folder here is one mission.
 
-This folder is not part of the program, and it is not your agent's folder. The harness never reads it. You copy a mission from here into your own agent.
+This folder is the public library. It is not your agent's folder. The missions of your agent are in the `missions/` folder of its root, and a mission gets there by a copy from here.
+
+The harness reads the library that came with the program you installed. A mission published after that release reaches you with the next update.
 
 A mission holds text and settings, never code. It can only use the tools and triggers that your harness has.
 
 ## Use a mission
 
-No command does this yet. You copy the folder by hand.
+There are two ways. Both copy the mission into your agent, under the `id` written in its manifest.
 
-1. Read the mission's `manifest.yaml`. Its `instructions` are what the model is told, and its `triggers` say when it runs.
-2. Copy the folder into your agent, under the `id` written in the manifest. That mission's `README.md` gives the exact command. For example:
+In the chat, ask the mission admin what the library holds, or ask for a mission by name. Before the mission is added, you get an approval request with its whole manifest.
 
-   ```
-   cp -R mission-library/morning-news ~/agents/ada/missions/m_4t8kx2n7w9qd
-   mkdir -p ~/agents/ada/missions/m_4t8kx2n7w9qd/memory ~/agents/ada/missions/m_4t8kx2n7w9qd/data
-   ```
+In a terminal:
 
-3. Run `mission-agent status --root ~/agents/ada`. The mission is in the list, or the command says what is wrong with the file.
+```
+mission-agent library list --root ~/agents/ada
+mission-agent library add morning-news --root ~/agents/ada
+```
 
-A running harness finds the new folder without a restart. After the copy the mission is yours: change it by hand, or through the mission admin in the chat.
+`library add` shows what the mission is told on every run, when it runs and which tools it uses. It asks before it copies.
+
+Read the `instructions` before you agree: they are what the model is told. A running harness finds the new mission without a restart. After the copy the mission is yours: change it by hand, or through the mission admin in the chat. An update of the program does not change it.
 
 ## Publish a mission
 
@@ -41,6 +44,7 @@ The rules:
 - The `id` is new: `m_` plus 12 characters from `0123456789abcdefghjkmnpqrstvwxyz`. No other mission in the library has it.
 - The manifest has no `gate:allow`. Whoever uses the mission decides which actions run without approval.
 - The folder has no `memory/` and no `data/` folder, and no secret value. Your notes and your files stay with you.
-- The `README.md` says what the mission does, when it runs, what it needs, and the copy command.
+- The `README.md` says what the mission does, when it runs, what it needs, and the command that adds it.
+- The folder holds no link to another file or folder. A link is not copied.
 
 `npm test` checks these rules for every folder here.

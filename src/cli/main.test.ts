@@ -56,9 +56,20 @@ async function run(args: string[], extra: Partial<CliIo> & { input?: string } = 
     stdin,
     secretStore: () => secrets,
     createHarness: makeHarness,
+    // A test never asks the real repository for its releases.
+    releaseCheck: async () => ({ ok: true, current: '0.1.0', latest: '0.1.0', newer: false }),
     ...extra,
   });
   return { code, out: out.text(), err: err.text() };
+}
+
+/** Waits until the condition holds, for at most five seconds. */
+async function waitUntil(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('The condition did not hold within five seconds.');
+    await new Promise((r) => setTimeout(r, 20));
+  }
 }
 
 describe('help and wrong input', () => {
@@ -305,6 +316,8 @@ describe('service', () => {
     expect(calls).toEqual([
       ['print', `gui/501/${plist.replace(/\.plist$/, '')}`],
       ['bootstrap', 'gui/501', plistPath],
+      ['print', `gui/501/${plist.replace(/\.plist$/, '')}`],
+      ['kickstart', `gui/501/${plist.replace(/\.plist$/, '')}`],
     ]);
     expect(readFileSync(plistPath, 'utf8')).toContain(`<string>${root}</string>`);
 
@@ -331,5 +344,192 @@ describe('service', () => {
     const missing = await run(['service', 'install', '--root', root], { serviceOptions: fakeService([], { cliPath: join(tmp, 'nope', 'cli.js') }) });
     expect(missing.code).toBe(1);
     expect(missing.err).toContain('cannot be found. Build it first with: npm run build');
+  });
+});
+
+describe('--version', () => {
+  it('prints the version of the program folder', async () => {
+    const dir = join(tmp, 'app');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ version: '3.4.5' }));
+    expect(await run(['--version'], { programDir: dir })).toEqual({ code: 0, out: '3.4.5\n', err: '' });
+    const real = await run(['--version']);
+    expect(real.out).toMatch(/^\d+\.\d+\.\d+\n$/);
+  });
+});
+
+describe('library', () => {
+  const ID = 'm_4t8kx2n7w9qd';
+  let library: string;
+
+  beforeEach(() => {
+    library = join(tmp, 'library');
+    mkdirSync(join(library, 'morning-news'), { recursive: true });
+    writeFileSync(
+      join(library, 'morning-news', 'manifest.yaml'),
+      [
+        `id: ${ID}`,
+        'name: morning-news',
+        'description: Sends a short summary of the news every morning',
+        'version: 1',
+        'status: active',
+        'triggers:',
+        '  - use: trigger:cron',
+        '    at: "0 7 * * *"',
+        'tools:',
+        '  - tool:web_search',
+        'context:',
+        '  instructions: |',
+        '    You are my news editor.',
+        '    Done well means: five links.',
+        'signals: []',
+        'gates: []',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(library, 'morning-news', 'README.md'), '# Morning news\n');
+  });
+
+  const lib = () => ({ libraryDir: library });
+
+  it('lists the published missions and says which ones the agent has', async () => {
+    await run(['init', '--name', 'Ada', '--root', root]);
+    const before = await run(['library', 'list', '--root', root], lib());
+    expect(before.code).toBe(0);
+    expect(before.out).toContain('morning-news  no    Sends a short summary of the news every morning');
+    expect(before.out).toContain(`Add one with: mission-agent library add <name> --root "${root}"`);
+    await run(['library', 'add', 'morning-news', '--yes', '--root', root], lib());
+    expect((await run(['library', 'list', '--root', root], lib())).out).toContain('morning-news  yes   Sends');
+  });
+
+  it('shows the mission, asks, and copies it only after a yes', async () => {
+    await run(['init', '--name', 'Ada', '--root', root]);
+    const no = await run(['library', 'add', 'morning-news', '--root', root], { ...lib(), input: 'n\n' });
+    expect(no.code).toBe(0);
+    expect(no.out).toContain(`Mission morning-news (${ID}): Sends a short summary of the news every morning`);
+    expect(no.out).toContain('    You are my news editor.');
+    expect(no.out).toContain('    Done well means: five links.');
+    expect(no.out).toContain('tool:web_search');
+    expect(no.err).toBe('Add this mission? [y/N] ');
+    expect(no.out).toContain('Nothing was changed.');
+    expect(existsSync(join(root, 'missions', ID))).toBe(false);
+
+    // Input that ends without an answer is a no.
+    const silent = await run(['library', 'add', 'morning-news', '--root', root], { ...lib(), input: '' });
+    expect(silent.out).toContain('Nothing was changed.');
+
+    const yes = await run(['library', 'add', 'morning-news', '--root', root], { ...lib(), input: 'y\n' });
+    expect(yes.code).toBe(0);
+    expect(yes.out).toContain('Added the mission morning-news.');
+    expect(yes.out).toContain('The harness loads it at its next start.');
+    expect(readFileSync(join(root, 'missions', ID, 'manifest.yaml'), 'utf8')).toContain('name: morning-news');
+    expect(existsSync(join(root, 'missions', ID, 'memory', 'MEMORY.md'))).toBe(true);
+    expect(existsSync(join(root, 'missions', ID, 'README.md'))).toBe(true);
+    const status = await run(['status', '--root', root]);
+    expect(status.out).toContain('morning-news');
+    expect(status.out).not.toContain('Manifests that are not loaded');
+  });
+
+  it('refuses a second copy, an unknown name, a root folder that is no agent, and a missing library', async () => {
+    const noAgent = await run(['library', 'add', 'morning-news', '--yes', '--root', root], lib());
+    expect(noAgent.code).toBe(1);
+    expect(noAgent.err).toContain('is not the root folder of an agent yet');
+
+    await run(['init', '--name', 'Ada', '--root', root]);
+    expect((await run(['library', 'add', 'morning-news', '--yes', '--root', root], lib())).code).toBe(0);
+    const twice = await run(['library', 'add', 'morning-news', '--yes', '--root', root], lib());
+    expect(twice.code).toBe(1);
+    expect(twice.err).toContain(`This agent already has a mission with the id ${ID}`);
+    expect(twice.err).not.toContain('    at ');
+
+    const unknown = await run(['library', 'add', 'nope', '--root', root], lib());
+    expect(unknown.code).toBe(1);
+    expect(unknown.err).toContain('The mission library has no mission "nope".');
+    expect((await run(['library', 'add', '--root', root], lib())).code).toBe(2);
+    expect((await run(['library', 'remove', 'x', '--root', root], lib())).code).toBe(2);
+
+    const missing = await run(['library', 'list', '--root', root], { libraryDir: join(tmp, 'none') });
+    expect(missing.code).toBe(1);
+    expect(missing.err).toContain('does not exist');
+  });
+
+  it('is loaded by a running harness without a restart', async () => {
+    await run(['init', '--name', 'Ada', '--login', 'subscription', '--root', root]);
+    let stop: (signal: string) => void = () => {};
+    const started = run(['start', '--root', root], { waitForSignal: () => new Promise((r) => (stop = r)) });
+    try {
+      await waitUntil(() => harnesses.length === 1 && harnesses[0]?.status().running === true);
+      const added = await run(['library', 'add', 'morning-news', '--yes', '--root', root], lib());
+      expect(added.out).toContain('The running harness loads it within a few seconds.');
+      await waitUntil(() => harnesses[0]?.registry.get(ID) !== undefined);
+    } finally {
+      stop('SIGINT');
+      await started;
+    }
+  });
+});
+
+describe('update', () => {
+  it('needs the root folder, and takes no argument', async () => {
+    const noRoot = await run(['update']);
+    expect(noRoot.code).toBe(2);
+    expect(noRoot.err).toBe("update needs the agent's root folder: mission-agent update --root <path>\n");
+    expect((await run(['update', 'now', '--root', root])).code).toBe(2);
+    expect((await run(['status', '--yes', '--root', root])).err).toContain('The option --yes is not used by the status command.');
+  });
+
+  it('refuses a program folder that was not installed with git, with a plain message', async () => {
+    const dir = join(tmp, 'app');
+    mkdirSync(dir);
+    const r = await run(['update', '--yes', '--root', root], { programDir: dir });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('was not installed with git');
+    expect(r.err).not.toContain('    at ');
+  });
+
+  it('runs the steps with the service of the root folder, and reports the new version', async () => {
+    const dir = join(tmp, 'app');
+    mkdirSync(join(dir, '.git'), { recursive: true });
+    mkdirSync(join(dir, 'dist'));
+    writeFileSync(join(dir, 'dist', 'cli.js'), '');
+    await run(['init', '--name', 'Ada', '--root', root]);
+    let head = 'v0.1.0';
+    const ran: string[] = [];
+    const r = await run(['update', '--root', root], {
+      programDir: dir,
+      input: 'yes\n',
+      serviceOptions: {
+        cliPath: join(dir, 'dist', 'cli.js'),
+        nodePath: process.execPath,
+        uid: 501,
+        launchAgentsDir: join(tmp, 'LaunchAgents'),
+        findHarness: async () => undefined,
+        launchctl: async (args) => (args[0] === 'print' ? { code: 113, stdout: '', stderr: 'not found' } : { code: 0, stdout: '', stderr: '' }),
+      },
+      runCommand: async (program, args) => {
+        ran.push(`${program === process.execPath ? 'node' : program} ${args.join(' ')}`);
+        const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' });
+        if (args[0] === 'describe') return ok(`${head}\n`);
+        if (args[0] === 'rev-parse') return ok('abc\n');
+        if (args[0] === 'tag' && args[2] === 'v*') return ok('v0.1.0\nv0.2.0\n');
+        if (args[0] === 'tag') return ok('The first update.\n');
+        if (args.includes('checkout')) head = args[args.length - 1] as string;
+        if (args[1] === 'build') {
+          mkdirSync(join(dir, 'dist'), { recursive: true });
+          writeFileSync(join(dir, 'dist', 'cli.js'), '');
+        }
+        if (args[1] === '--version') return ok('0.2.0\n');
+        return ok();
+      },
+    });
+    expect(r.err).toBe('Install version 0.2.0? [y/N] ');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('  The first update.');
+    expect(r.out).toContain('Version 0.2.0 is installed.');
+    expect(ran).toContain('git -c advice.detachedHead=false checkout --detach v0.2.0');
+    expect(ran).toContain(`node ${join(dir, 'dist', 'cli.js')} --version`);
+    const copies = readdirSync(join(root, 'backups', 'update'));
+    expect(copies).toHaveLength(1);
+    expect(existsSync(join(root, 'backups', 'update', copies[0] as string, 'agent.yaml'))).toBe(true);
   });
 });

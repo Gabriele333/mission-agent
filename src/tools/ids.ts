@@ -40,6 +40,9 @@ export const REGISTRY_TOOLS = {
   editMission: 'edit_mission',
   freezeMission: 'freeze_mission',
   deleteMission: 'delete_mission',
+  listLibrary: 'list_library',
+  readLibraryMission: 'read_library_mission',
+  addLibraryMission: 'add_library_mission',
 } as const;
 
 // ---------------------------------------------------------------- action ids
@@ -56,6 +59,8 @@ export const REGISTRY_ACTION_IDS = {
   list: 'action:registry.list',
   read: 'action:registry.read',
   catalog: 'action:catalog.list',
+  libraryList: 'action:library.list',
+  libraryRead: 'action:library.read',
   create: REGISTRY_CREATE,
   edit: REGISTRY_EDIT,
   freeze: REGISTRY_FREEZE,

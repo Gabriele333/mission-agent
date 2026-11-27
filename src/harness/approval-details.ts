@@ -1,6 +1,8 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { findLibraryMission, readLibrary } from '../library/index.js';
 import type { Paths } from '../paths.js';
+import { libraryDir as programLibraryDir } from '../program.js';
 import { visibleLine } from '../safety/index.js';
 import { REGISTRY_ACTION_IDS } from '../tools/index.js';
 import type { ApprovalRequest, Manifest, MissionRegistry, Store } from '../types.js';
@@ -17,6 +19,8 @@ export interface ApprovalDetailsContext {
   pendingApprovals(): ApprovalRequest[];
   credentialIdsOf(manifest: Pick<Manifest, 'tools' | 'triggers'>): string[];
   hasSecret(id: string): Promise<boolean>;
+  /** The folder of the mission library. Default: the one that comes with the program. */
+  libraryDir?: () => string;
 }
 
 /** Undefined for a request that needs nothing beyond its input. */
@@ -64,7 +68,33 @@ function asList<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
+/**
+ * A mission of the mission library is added by its name, so the input does not hold its
+ * manifest. The details hold it, as JSON, so the user approves the whole manifest (§4.2).
+ */
+async function libraryDetails(ref: string, ctx: ApprovalDetailsContext): Promise<string> {
+  const shown = visibleLine(ref);
+  let found;
+  try {
+    found = findLibraryMission(readLibrary((ctx.libraryDir ?? programLibraryDir)()), ref);
+  } catch (err) {
+    return `The mission library cannot be read (${visibleLine(err instanceof Error ? err.message : String(err))}). Adding "${shown}" will fail.`;
+  }
+  if (found === undefined) return `The mission library has no mission "${shown}". Adding it will fail.`;
+  const m = found.manifest;
+  const lines = [
+    `Adds the mission ${m.name} from the mission library to this agent, with the id ${m.id}.`,
+    'Its manifest, as published:',
+    JSON.stringify(m, null, 2),
+  ];
+  if (found.skills.length > 0) lines.push(`It also brings these skills: ${found.skills.join(', ')}.`);
+  if (ctx.registry.get(m.id) !== undefined) lines.push('This agent already has this mission. Adding it will fail.');
+  lines.push(missingText(await missingOf(m, ctx)));
+  return lines.join('\n');
+}
+
 async function createDetails(input: Record<string, unknown>, ctx: ApprovalDetailsContext): Promise<string> {
+  if (typeof input.library_mission === 'string') return libraryDetails(input.library_mission, ctx);
   const draft = (input.manifest ?? {}) as Record<string, unknown>;
   // The draft is not validated yet, so its name may hold a line break or a control character.
   const name = typeof draft.name === 'string' ? visibleLine(draft.name) : '(no name)';

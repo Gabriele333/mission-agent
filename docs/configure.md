@@ -1,6 +1,6 @@
 # Configure
 
-The configuration is in the agent's root folder ([Install](install.md), step 2). Secrets are in the macOS Keychain, never in a file. The harness reads a change without a restart.
+The configuration is in the agent's root folder ([Install](install.md), "The agent's folder"). Secrets are in the macOS Keychain, never in a file. The harness reads a change without a restart.
 
 You configure the agent in the setup page, or by hand.
 
@@ -83,7 +83,7 @@ The Telegram part has only been tested with a fake Telegram service so far.
 A new agent has two missions: the general mission, and the mission admin. You get more in three ways:
 
 - Ask in the chat, for example "create a mission that sends me the news each morning". The mission admin writes it, and every change waits for your approval.
-- Copy one that someone published: see the [mission library](../mission-library/README.md).
+- Add one that someone published. Ask the mission admin for it in the chat, or run `mission-agent library add <name> --root ~/agents/ada`. See the [mission library](../mission-library/README.md).
 - Edit a `missions/<id>/manifest.yaml` file by hand. The harness reads the change and reports an error in the file.
 
 ## Check it

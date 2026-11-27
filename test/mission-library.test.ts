@@ -1,10 +1,11 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { readMissionsFromFiles } from '../src/cli/offline.js';
 import { defaultConfig } from '../src/config/index.js';
+import { readLibrary } from '../src/library/index.js';
 import { createMissionRegistry, MISSION_ADMIN_MANIFEST, parseManifest, validateManifest } from '../src/manifest/index.js';
 import { pathsFor } from '../src/paths.js';
 import { builtinTools, createCodeCatalog, createToolCatalog } from '../src/tools/index.js';
@@ -13,7 +14,7 @@ import type { Manifest, ToolCatalog } from '../src/types.js';
 
 /**
  * The rules of mission-library/README.md, checked for every published mission.
- * A mission must also load in a real registry after the copy that the README describes.
+ * A mission must also load in a real registry after it is added to an agent.
  */
 
 const LIBRARY = join(dirname(fileURLToPath(import.meta.url)), '..', 'mission-library');
@@ -44,6 +45,18 @@ function read(folder: string): Manifest {
   return parsed.manifest;
 }
 
+/** Every link under a folder. A link is not copied into an agent, so a published mission holds none. */
+function linksIn(dir: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry);
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) found.push(path);
+    else if (stat.isDirectory()) found.push(...linksIn(path));
+  }
+  return found;
+}
+
 describe('mission library', () => {
   it('holds at least one mission', () => {
     expect(folders.length).toBeGreaterThan(0);
@@ -60,6 +73,7 @@ describe('mission library', () => {
     expect(existsSync(join(LIBRARY, folder, 'memory')), 'no memory/ folder').toBe(false);
     expect(existsSync(join(LIBRARY, folder, 'data')), 'no data/ folder').toBe(false);
     expect(existsSync(join(LIBRARY, folder, 'README.md')), 'a README.md is required').toBe(true);
+    expect(linksIn(join(LIBRARY, folder)), 'no link to another file or folder').toEqual([]);
   });
 
   it('gives every mission its own id', () => {
@@ -67,16 +81,8 @@ describe('mission library', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it('loads every mission in a registry after the copy that the README describes', () => {
+  it('adds every mission to an agent the way the library commands and the mission admin do', () => {
     mkdirSync(paths.missionsDir, { recursive: true });
-    const expected: string[] = [];
-    for (const folder of folders) {
-      const m = read(folder);
-      cpSync(join(LIBRARY, folder), paths.missionDir(m.id), { recursive: true });
-      expected.push(m.name);
-    }
-    expect(readMissionsFromFiles(paths).problems).toEqual([]);
-
     const memory = new Map<string, string>();
     const registry = createMissionRegistry({
       paths,
@@ -85,9 +91,17 @@ describe('mission library', () => {
       codeManifests: [MISSION_ADMIN_MANIFEST],
       memory: { get: (k) => memory.get(k), set: (k, v) => void memory.set(k, v) },
     });
-    registry.reload();
+    const library = readLibrary(LIBRARY);
+    expect(library.problems).toEqual([]);
+    expect(library.missions.map((m) => m.folder)).toEqual(folders);
+    for (const mission of library.missions) {
+      const added = registry.install(mission.dir);
+      expect(added.id).toBe(mission.manifest.id);
+      expect(existsSync(paths.memoryIndexFile(added.id))).toBe(true);
+    }
     expect(registry.errors()).toEqual([]);
+    expect(readMissionsFromFiles(paths).problems).toEqual([]);
     const loaded = registry.list().map((x) => x.name);
-    for (const name of expected) expect(loaded).toContain(name);
+    for (const folder of folders) expect(loaded).toContain(folder);
   });
 });

@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import YAML from 'yaml';
 import { z } from 'zod';
@@ -13,8 +14,11 @@ import {
   editMissionShape,
   freezeMission,
   freezeMissionShape,
+  addLibraryMission,
   listCatalog,
+  listLibrary,
   listMissions,
+  readLibraryMission,
   readMission,
 } from './mission-registry.js';
 import { makeHarness, textOf, type Harness } from './test-helpers.js';
@@ -63,7 +67,7 @@ describe('list_missions', () => {
     const out = json(listMissions(ctx));
     expect(out.missions).toEqual([
       { id: SYS_GENERAL, name: SYS_GENERAL, description: 'Handles any request that no other mission covers', status: 'active', version: 1 },
-      { id: SYS_MISSION_ADMIN, name: SYS_MISSION_ADMIN, description: 'Creates, edits, freezes and deletes missions', status: 'active', version: 1 },
+      { id: SYS_MISSION_ADMIN, name: SYS_MISSION_ADMIN, description: 'Creates, edits, freezes and deletes missions, and adds missions from the mission library', status: 'active', version: 1 },
       { id: m.id, name: 'news-curator', description: 'Curates my news every morning', status: 'active', version: 1 },
     ]);
     expect(out.errors.length).toBeGreaterThan(0);
@@ -365,5 +369,94 @@ describe('input shapes', () => {
 
   it('requires a boolean for frozen', () => {
     expect(z.object(freezeMissionShape).safeParse({ mission: 'x', frozen: 'yes' }).success).toBe(false);
+  });
+});
+
+describe('the mission library', () => {
+  const ID = 'm_4t8kx2n7w9qd';
+  let library: string;
+  let deps: Parameters<typeof listLibrary>[1];
+
+  beforeEach(() => {
+    library = join(h.root, 'the-library');
+    mkdirSync(join(library, 'morning-news', 'skills', 'summarise'), { recursive: true });
+    writeFileSync(
+      join(library, 'morning-news', 'manifest.yaml'),
+      YAML.stringify({
+        id: ID,
+        name: 'morning-news',
+        description: 'Sends a short summary of the news every morning',
+        version: 1,
+        status: 'active',
+        triggers: [{ use: 'trigger:cron', at: '0 7 * * *' }, { use: 'trigger:chat' }],
+        tools: ['tool:web_search'],
+        context: { instructions: 'You are my news editor.\n' },
+        signals: [],
+        gates: [],
+      }),
+    );
+    writeFileSync(join(library, 'morning-news', 'README.md'), '# Morning news\n');
+    mkdirSync(join(library, 'broken'));
+    writeFileSync(join(library, 'README.md'), 'About the library.\n');
+    deps = { ...h.deps, libraryDir: () => library };
+  });
+
+  it('lists the published missions, says which ones the agent has, and reports a folder it cannot use', async () => {
+    const before = json(listLibrary(ctx, deps));
+    expect(before.missions).toEqual([
+      {
+        name: 'morning-news',
+        description: 'Sends a short summary of the news every morning',
+        triggers: [{ use: 'trigger:cron', at: '0 7 * * *' }, { use: 'trigger:chat' }],
+        tools: ['tool:web_search'],
+        inThisAgent: false,
+      },
+    ]);
+    expect(before.problems).toEqual(['mission-library/broken has no manifest.yaml.']);
+    await addLibraryMission(ctx, deps, { library_mission: 'morning-news' });
+    expect(json(listLibrary(ctx, deps)).missions[0].inThisAgent).toBe(true);
+  });
+
+  it('returns the manifest, the skills and the text of one published mission', () => {
+    const out = json(readLibraryMission(deps, { library_mission: 'morning-news' }));
+    expect(out.manifest).toMatchObject({ id: ID, name: 'morning-news', context: { instructions: 'You are my news editor.\n' } });
+    expect(out.skills).toEqual(['summarise']);
+    expect(out.readme).toBe('# Morning news\n');
+    const missing = readLibraryMission(deps, { library_mission: '../../etc' });
+    expect(missing.isError).toBe(true);
+    expect(textOf(missing)).toContain('The mission library has no mission "../../etc".');
+  });
+
+  it('adds a published mission under its own id and tells the harness', async () => {
+    const result = await addLibraryMission(ctx, deps, { library_mission: 'morning-news' });
+    expect(result.isError, textOf(result)).toBeUndefined();
+    expect(textOf(result)).toContain(`Added the mission morning-news from the mission library, with id ${ID}, version 1.`);
+    expect(h.registry.get(ID)?.name).toBe('morning-news');
+    expect(existsSync(h.paths.memoryIndexFile(ID))).toBe(true);
+    expect(h.host.changed).toEqual([ID]);
+
+    const again = await addLibraryMission(ctx, deps, { library_mission: 'morning-news' });
+    expect(again.isError).toBe(true);
+    expect(textOf(again)).toContain('already has a mission with the id');
+    expect(h.host.changed).toEqual([ID]);
+  });
+
+  it('fails with a plain text for a mission that is not published, and when the library is missing', async () => {
+    const unknown = await addLibraryMission(ctx, deps, { library_mission: 'nope' });
+    expect(unknown.isError).toBe(true);
+    expect(textOf(unknown)).toContain('Call list_library to see the missions.');
+    rmSync(library, { recursive: true });
+    for (const result of [listLibrary(ctx, deps), readLibraryMission(deps, { library_mission: 'x' }), await addLibraryMission(ctx, deps, { library_mission: 'x' })]) {
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('The mission library cannot be read');
+    }
+  });
+
+  it('declares the add operation as the create action, so it always waits for approval', () => {
+    const tool = h.tools.get('tool:mission_registry');
+    const byName = new Map(tool?.operations.map((o) => [o.sdkToolName, o]));
+    expect(byName.get('mcp__mission_registry__add_library_mission')).toMatchObject({ action: 'action:registry.create', effect: 'change' });
+    expect(byName.get('mcp__mission_registry__list_library')).toMatchObject({ action: 'action:library.list', effect: 'read' });
+    expect(byName.get('mcp__mission_registry__read_library_mission')).toMatchObject({ action: 'action:library.read', effect: 'read' });
   });
 });

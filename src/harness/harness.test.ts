@@ -11,7 +11,7 @@ import { createMemorySecretStore, MODEL_API_KEY, TELEGRAM_BOT_TOKEN } from '../s
 import { readServerFile } from '../server/index.js';
 import { collectEvents, waitFor, type EventCollector } from '../server/test-helpers.js';
 import { SYS_GENERAL, SYS_MISSION_ADMIN, type SecretStore } from '../types.js';
-import { createHarness, HarnessAlreadyRunningError, type Harness } from './harness.js';
+import { createHarness, HarnessAlreadyRunningError, type Harness, type HarnessOptions } from './harness.js';
 import { STATE_KEYS } from './state.js';
 import { fakeSurface, scriptedQuery, simpleAnswers, TELEGRAM, type FakeSurface } from './test-helpers.js';
 
@@ -44,9 +44,12 @@ function agentYaml(extra = ''): void {
   writeFileSync(join(root, 'agent.yaml'), `agent_name: Ada\nmodel_login: subscription\n${extra}`);
 }
 
-function make(options: { secrets?: SecretStore; handler?: Parameters<typeof scriptedQuery>[0] } = {}): Harness {
+function make(
+  options: { secrets?: SecretStore; handler?: Parameters<typeof scriptedQuery>[0]; extra?: Partial<HarnessOptions> } = {},
+): Harness {
   const { queryFn } = scriptedQuery(options.handler ?? simpleAnswers());
   const h = createHarness({
+    ...options.extra,
     root,
     secretStore: options.secrets ?? createMemorySecretStore(),
     queryFn,
@@ -397,5 +400,93 @@ describe('an invalid manifest stops only its own mission (§A.4, §H)', () => {
     expect(h.registry.errors().map((e) => e.message)).toContain(
       'The file could not be read as a manifest: Excessive alias count indicates a resource exhaustion attack',
     );
+  });
+});
+
+describe('the check for a newer release (chapter 7.4)', () => {
+  let now: Date;
+  let checks: number;
+  let answer: Awaited<ReturnType<NonNullable<HarnessOptions['releaseCheck']>>>;
+
+  beforeEach(() => {
+    now = new Date('2026-11-25T10:00:00.000Z');
+    checks = 0;
+    answer = { ok: true, current: '0.1.0', latest: '0.2.0', newer: true };
+  });
+
+  const withCheck = () =>
+    make({
+      extra: {
+        now: () => now,
+        releaseCheckPollMs: 20,
+        releaseCheck: async () => {
+          checks += 1;
+          return answer;
+        },
+      },
+    });
+
+  it('tells the user once about a newer release, with the command that installs it, and looks once a day', async () => {
+    agentYaml();
+    const h = withCheck();
+    await h.start();
+    const stream = await chatStream(h);
+    await waitFor(() => textsOf(stream).some((t) => t.includes('is available')), 'the notice');
+    const notice = textsOf(stream).find((t) => t.includes('is available'));
+    expect(notice).toBe(
+      'Version 0.2.0 of the harness is available. This agent runs version 0.1.0. ' +
+        `To install it, run in a terminal: mission-agent update --root ${root}`,
+    );
+    expect(h.store.getState(STATE_KEYS.releaseNoticed)).toBe('0.2.0');
+
+    // Within a day the timer looks at the clock and does not ask again.
+    await new Promise((r) => setTimeout(r, 120));
+    expect(checks).toBe(1);
+
+    // A day later it asks again, and says nothing about a release it already named.
+    now = new Date('2026-11-26T10:00:01.000Z');
+    await waitFor(() => checks === 2, 'the second check');
+    await new Promise((r) => setTimeout(r, 60));
+    expect(textsOf(stream).filter((t) => t.includes('is available'))).toHaveLength(1);
+
+    // A newer one is named.
+    answer = { ok: true, current: '0.1.0', latest: '0.3.0', newer: true };
+    now = new Date('2026-11-27T10:00:02.000Z');
+    await waitFor(() => textsOf(stream).some((t) => t.includes('Version 0.3.0')), 'the second notice');
+  });
+
+  it('says nothing when the installed release is the newest, and after a restart within a day it does not ask again', async () => {
+    agentYaml();
+    answer = { ok: true, current: '0.2.0', latest: '0.2.0', newer: false };
+    const h = withCheck();
+    await h.start();
+    await waitFor(() => checks === 1, 'the check');
+    expect(h.store.getState(STATE_KEYS.releaseNoticed)).toBeUndefined();
+    await h.stop();
+
+    const again = withCheck();
+    await again.start();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(checks).toBe(1);
+  });
+
+  it('logs once why a check got no answer, and tries again at the next look', async () => {
+    agentYaml();
+    answer = { ok: false, reason: 'git could not read the releases: offline' };
+    const h = withCheck();
+    await h.start();
+    await waitFor(() => checks >= 3, 'three checks');
+    expect(logs.filter((l) => l.includes('got no answer'))).toEqual([
+      'The check for a newer release got no answer: git could not read the releases: offline',
+    ]);
+    expect(h.store.getState(STATE_KEYS.releaseCheckedAt)).toBeUndefined();
+  });
+
+  it('never looks when no check is given, and reports the version of the program', async () => {
+    agentYaml();
+    const h = make();
+    await h.start();
+    expect(h.status().version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(h.store.getState(STATE_KEYS.releaseCheckedAt)).toBeUndefined();
   });
 });

@@ -9,6 +9,7 @@ import { installService, ServiceError, servicePlan, serviceStatus, type ServiceO
 import { StoppedError } from '../surfaces/telegram/index.js';
 import { applyConfigPatch, readConfigView, readTexts, writeTexts } from './config-edit.js';
 import { bodyObject, errorText, fail } from './http.js';
+import { shellQuote } from '../shell.js';
 
 /**
  * The routes of the setup page (chapter 5, §J.1). Every changing route is a POST with a JSON body.
@@ -40,10 +41,7 @@ type Pairing =
   | { state: 'paired'; userId: number }
   | { state: 'failed' | 'cancelled'; reason: string };
 
-/** Quotes a value for a POSIX shell, so a path with spaces or quotes still works when pasted. */
-export function shellQuote(value: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
-}
+export { shellQuote };
 
 /** The sign-in command of §A.5 with the real path. The page shows it and never runs it. */
 export function signInCommand(sdkConfigDir: string): string {

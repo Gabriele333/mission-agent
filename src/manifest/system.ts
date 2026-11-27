@@ -36,7 +36,7 @@ model: default
 export const MISSION_ADMIN_MANIFEST: Manifest = {
   id: SYS_MISSION_ADMIN,
   name: SYS_MISSION_ADMIN,
-  description: 'Creates, edits, freezes and deletes missions',
+  description: 'Creates, edits, freezes and deletes missions, and adds missions from the mission library',
   version: 1,
   status: 'active',
   triggers: [{ use: 'trigger:chat' }],
@@ -48,6 +48,9 @@ signals, gates, model, effort and limits. Triggers, tools,
 signals and gates use only ids that exist in the registry. You
 write no code. The context holds the instructions. You may
 suggest the rating signal to the user.
+A mission can also come from the mission library, the published
+missions that come with the harness. You add one as it is
+published, when the user asks for it.
 You cannot change the manifest of a system mission, your own
 included. You may suggest a change to the user, and a developer
 makes it.

@@ -1,11 +1,22 @@
 import { execFile } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pathsFor, type Paths } from '../paths.js';
 import { isServerAlive, readServerFile } from '../server/index.js';
-import { buildPlist, serviceLabel, serviceLogPaths } from './plist.js';
+import { buildPlist, SERVICE_LABEL_PREFIX, serviceLabel, serviceLogPaths, xmlEscape } from './plist.js';
 
 /**
  * Installs the harness as a LaunchAgent of the user's account (§H "Keeping the harness running").
@@ -37,7 +48,7 @@ export interface ServiceOptions {
   root: string;
   /** The built `cli.js`. Default: the one next to this module in `dist/`. */
   cliPath?: string;
-  /** Default: the node program that runs now. */
+  /** Default: the node program that runs now, by a path that stays valid after an upgrade of node. */
   nodePath?: string;
   /** Default: the PATH of the installing process. */
   envPath?: string;
@@ -46,6 +57,8 @@ export interface ServiceOptions {
   /** Default: `~/Library/LaunchAgents`. */
   launchAgentsDir?: string;
   launchctl?: LaunchctlRunner;
+  /** How long to wait for launchd to remove a service after `bootout`. Default 40 seconds. */
+  removalWaitMs?: number;
   /** Finds a harness that answers on the local server of the root. Default: `state/server` and a ping. */
   findHarness?: (paths: Paths) => Promise<{ pid: number } | undefined>;
 }
@@ -76,6 +89,11 @@ export interface ServiceStatus {
   pid?: number;
   /** The state that launchd reports, such as `running` or `not running`. */
   state?: string;
+  /**
+   * Set while launchd holds back a start of the service that nothing asked for, such as the
+   * start at load or the start after a crash. The value is launchd's own word for the kind of start.
+   */
+  heldBack?: string;
 }
 
 export interface InstallResult {
@@ -87,6 +105,14 @@ export interface InstallResult {
    * harness only after that one stops.
    */
   handover: boolean;
+  /**
+   * launchd loaded the service and held back its start. Its log calls this state of a login
+   * session "on-demand-only mode". The install asks for the start itself, so the harness runs,
+   * but launchd does not start it again after a crash while the state lasts.
+   */
+  heldBack: boolean;
+  /** Why the start that the install asked for failed. Undefined when it did not fail. */
+  startError?: string;
 }
 
 export interface UninstallResult {
@@ -106,6 +132,31 @@ export class ServiceError extends Error {
 /** The built `cli.js` next to this module: `dist/service/service.js` gives `dist/cli.js`. */
 export function builtCliPath(): string {
   return fileURLToPath(new URL('../cli.js', import.meta.url));
+}
+
+/**
+ * The path of the node program that the service file records. `process.execPath` is the real
+ * file, and a package manager can put the version number in that path, so an upgrade of node
+ * would remove it. A `node` in a folder of the PATH that leads to the same file stays valid
+ * after an upgrade, so that one is recorded. Without one, the real file is recorded.
+ */
+export function stableNodePath(execPath: string = process.execPath, envPath: string | undefined = process.env.PATH): string {
+  let real: string;
+  try {
+    real = realpathSync(execPath);
+  } catch {
+    return execPath;
+  }
+  for (const dir of (envPath ?? '').split(delimiter)) {
+    if (!isAbsolute(dir)) continue;
+    const candidate = join(dir, 'node');
+    try {
+      if (realpathSync(candidate) === real) return candidate;
+    } catch {
+      // No node program in this folder.
+    }
+  }
+  return execPath;
 }
 
 function uidOf(options: ServiceOptions): number {
@@ -128,9 +179,9 @@ export function servicePlan(options: ServiceOptions): ServicePlan {
   const dir = options.launchAgentsDir ?? join(homedir(), 'Library', 'LaunchAgents');
   const logs = serviceLogPaths(root);
   const cliPath = resolve(options.cliPath ?? builtCliPath());
-  const nodePath = options.nodePath ?? process.execPath;
-  const programArguments = [nodePath, cliPath, 'start', '--root', root];
   const envPath = options.envPath ?? process.env.PATH ?? FALLBACK_PATH;
+  const nodePath = options.nodePath ?? stableNodePath(process.execPath, envPath);
+  const programArguments = [nodePath, cliPath, 'start', '--root', root];
   const plistText = buildPlist({
     label,
     programArguments,
@@ -153,6 +204,29 @@ export function servicePlan(options: ServiceOptions): ServicePlan {
   };
 }
 
+/**
+ * The service files of other root folders that run the same built program. An update replaces
+ * the program under every one of them (chapter 7.4).
+ */
+export function otherServiceFiles(options: ServiceOptions): string[] {
+  const plan = servicePlan(options);
+  const dir = resolve(plan.plistPath, '..');
+  if (!existsSync(dir)) return [];
+  const program = `<string>${xmlEscape(plan.programArguments[1] as string)}</string>`;
+  const found: string[] = [];
+  for (const name of readdirSync(dir).sort()) {
+    if (!name.startsWith(`${SERVICE_LABEL_PREFIX}.`) || !name.endsWith('.plist')) continue;
+    const file = join(dir, name);
+    if (file === plan.plistPath) continue;
+    try {
+      if (readFileSync(file, 'utf8').includes(program)) found.push(file);
+    } catch {
+      // A file that cannot be read is not counted.
+    }
+  }
+  return found;
+}
+
 /** Reads the state of the service with `launchctl print`. */
 export async function serviceStatus(options: ServiceOptions): Promise<ServiceStatus> {
   const root = resolve(options.root);
@@ -169,7 +243,26 @@ export async function serviceStatus(options: ServiceOptions): Promise<ServiceSta
   if (pid?.[1] !== undefined) status.pid = Number(pid[1]);
   const state = /^\s*state = (.+?)\s*$/m.exec(printed.stdout);
   if (state?.[1] !== undefined) status.state = state[1];
+  const held = /^\s*pended nondemand spawn = (.+?)\s*$/m.exec(printed.stdout);
+  if (held?.[1] !== undefined && status.pid === undefined) status.heldBack = held[1];
   return status;
+}
+
+/**
+ * Removes a loaded service with `launchctl bootout`, and waits until launchd no longer knows it.
+ * `bootout` returns while the harness still stops, and a `bootstrap` in that time fails.
+ */
+async function bootoutAndWait(options: ServiceOptions, plan: Pick<ServicePlan, 'domain' | 'label'>, what: string): Promise<void> {
+  const run = runnerOf(options);
+  const target = `${plan.domain}/${plan.label}`;
+  const out = await run(['bootout', target]);
+  if (out.code !== 0) throw new ServiceError(`launchctl could not remove ${what}: ${out.stderr.trim() || `exit code ${out.code}`}`);
+  const deadline = Date.now() + (options.removalWaitMs ?? 40_000);
+  for (;;) {
+    if ((await run(['print', target])).code !== 0) return;
+    if (Date.now() >= deadline) throw new ServiceError(`launchd did not remove ${what} in time. Run the command again.`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  }
 }
 
 async function defaultFindHarness(paths: Paths): Promise<{ pid: number } | undefined> {
@@ -187,7 +280,7 @@ function isFile(path: string): boolean {
 }
 
 /**
- * Writes the plist and loads it with `launchctl bootstrap`. It refuses when the built program
+ * Writes the plist, loads it with `launchctl bootstrap` and starts it with `launchctl kickstart`. It refuses when the built program
  * cannot be found, and when a harness for the root runs in the foreground. `callerPid` is the
  * harness that serves the setup page: that one may ask, and the service then starts the harness
  * once the foreground one stops.
@@ -225,10 +318,7 @@ export async function installService(options: ServiceOptions & { callerPid?: num
     }
   }
 
-  if (status.loaded) {
-    const out = await run(['bootout', `${plan.domain}/${plan.label}`]);
-    if (out.code !== 0) throw new ServiceError(`launchctl could not remove the old service: ${out.stderr.trim() || `exit code ${out.code}`}`);
-  }
+  if (status.loaded) await bootoutAndWait(options, plan, 'the old service');
 
   mkdirSync(serviceLogPaths(plan.root).dir, { recursive: true, mode: 0o700 });
   const dir = resolve(plan.plistPath, '..');
@@ -248,7 +338,14 @@ export async function installService(options: ServiceOptions & { callerPid?: num
     }
     throw new ServiceError(`launchctl could not load the service: ${loaded.stderr.trim() || `exit code ${loaded.code}`}`);
   }
-  return { plan, replaced: status.loaded, handover };
+
+  // launchd starts a loaded service by itself, except while it holds such starts back. A start
+  // that is asked for always runs, and does nothing when the service already runs.
+  const heldBack = (await serviceStatus(options)).heldBack !== undefined;
+  const kicked = await run(['kickstart', `${plan.domain}/${plan.label}`]);
+  const result: InstallResult = { plan, replaced: status.loaded, handover, heldBack };
+  if (kicked.code !== 0) result.startError = kicked.stderr.trim() || `exit code ${kicked.code}`;
+  return result;
 }
 
 /** Stops and removes the service with `launchctl bootout`, then removes the plist. */
@@ -256,10 +353,7 @@ export async function uninstallService(options: ServiceOptions): Promise<Uninsta
   const plan = servicePlan(options);
   const run = runnerOf(options);
   const status = await serviceStatus(options);
-  if (status.loaded) {
-    const out = await run(['bootout', `${plan.domain}/${plan.label}`]);
-    if (out.code !== 0) throw new ServiceError(`launchctl could not remove the service: ${out.stderr.trim() || `exit code ${out.code}`}`);
-  }
+  if (status.loaded) await bootoutAndWait(options, plan, 'the service');
   let removedFile = false;
   if (existsSync(plan.plistPath)) {
     unlinkSync(plan.plistPath);

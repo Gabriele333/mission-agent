@@ -18,10 +18,16 @@ export interface PlistInput {
   envPath: string;
 }
 
+/** Seconds that launchd waits for the harness to stop before it kills it. The default of launchd is 5. */
+export const EXIT_TIMEOUT_SECONDS = 30;
+
+/** The start of the label of every service of this program. */
+export const SERVICE_LABEL_PREFIX = 'local.mission-agent';
+
 /** A label that holds a short hash of the root path, so two agents on one machine do not collide. */
 export function serviceLabel(root: string): string {
   const hash = createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12);
-  return `local.mission-agent.${hash}`;
+  return `${SERVICE_LABEL_PREFIX}.${hash}`;
 }
 
 /** The two log files of the service, in `state/logs/`. */
@@ -79,6 +85,10 @@ export function buildPlist(input: PlistInput): string {
     '    <key>SuccessfulExit</key>',
     '    <false/>',
     '  </dict>',
+    // launchd kills a service that has not stopped this many seconds after it asked. The harness
+    // waits up to 20 seconds for the runs in progress, and a kill would count as a crash (§H).
+    '  <key>ExitTimeOut</key>',
+    `  <integer>${EXIT_TIMEOUT_SECONDS}</integer>`,
     '  <key>StandardOutPath</key>',
     `  ${str(input.stdoutPath)}`,
     '  <key>StandardErrorPath</key>',

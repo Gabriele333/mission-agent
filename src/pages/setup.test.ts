@@ -356,7 +356,11 @@ describe('the service (§5.1 step 5)', () => {
     // This harness runs in the foreground, so the service takes over when it stops.
     expect(body).toMatchObject({ ok: true, handover: true, plistPath: view.plan.plistPath });
     expect(readFileSync(view.plan.plistPath, 'utf8')).toBe(view.plan.plistText);
-    expect(r.launchctlCalls.at(-1)).toEqual(['bootstrap', 'gui/501', view.plan.plistPath]);
+    expect(r.launchctlCalls.slice(-3)).toEqual([
+      ['bootstrap', 'gui/501', view.plan.plistPath],
+      ['print', `gui/501/${view.plan.label}`],
+      ['kickstart', `gui/501/${view.plan.label}`],
+    ]);
   });
 
   it('refuses to install again from a harness that runs as the service', async () => {

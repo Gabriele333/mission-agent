@@ -9,9 +9,10 @@ Sends you a short summary of the news on the topics you follow.
 ## Use it
 
 ```
-cp -R mission-library/morning-news ~/agents/ada/missions/m_4t8kx2n7w9qd
-mkdir -p ~/agents/ada/missions/m_4t8kx2n7w9qd/memory ~/agents/ada/missions/m_4t8kx2n7w9qd/data
+mission-agent library add morning-news --root ~/agents/ada
 ```
+
+Or ask the mission admin in the chat to add `morning-news` from the library.
 
 Then tell it your topics in the chat, for example: `/mission morning-news` and "I follow chip makers and Italian politics".
 

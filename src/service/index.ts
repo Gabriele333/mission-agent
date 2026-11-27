@@ -1,12 +1,14 @@
 /** The macOS service that keeps the harness running (§H). */
-export { buildPlist, serviceLabel, serviceLogPaths, xmlEscape, type PlistInput } from './plist.js';
+export { buildPlist, SERVICE_LABEL_PREFIX, serviceLabel, serviceLogPaths, xmlEscape, type PlistInput } from './plist.js';
 export {
   builtCliPath,
   execLaunchctl,
   installService,
+  otherServiceFiles,
   ServiceError,
   servicePlan,
   serviceStatus,
+  stableNodePath,
   uninstallService,
   type InstallResult,
   type LaunchctlResult,

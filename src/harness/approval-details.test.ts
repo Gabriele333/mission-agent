@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createMemoryStore } from '../db/index.js';
@@ -112,5 +112,44 @@ describe('approval details (§4.2, §4.2.1)', () => {
     expect(await approvalDetails(req('action:email.send', {}), ctx)).toBeUndefined();
     const shown = describeApproval({ ...req('action:registry.delete', { mission: 'news' }), details: 'Removes all.' }, 'sys-mission-admin');
     expect(shown).toBe('Mission: sys-mission-admin\nAction: action:registry.delete\nRemoves all.\nInput:\n{\n  "mission": "news"\n}');
+  });
+  it('shows the whole manifest of a mission that is added from the mission library', async () => {
+    const library = join(h.root, 'the-library');
+    mkdirSync(join(library, 'morning-news', 'skills', 'summarise'), { recursive: true });
+    writeFileSync(
+      join(library, 'morning-news', 'manifest.yaml'),
+      [
+        'id: m_4t8kx2n7w9qd',
+        'name: morning-news',
+        'description: Sends the news',
+        'version: 1',
+        'status: active',
+        'triggers:',
+        '  - use: trigger:cron',
+        '    at: "0 7 * * *"',
+        'tools: []',
+        'context:',
+        '  instructions: |',
+        '    You are my news editor.',
+        '    Credentials: none is missing.',
+        'signals: []',
+        'gates: []',
+        '',
+      ].join('\n'),
+    );
+    missing.add('credential:clock.key');
+    const withLibrary = { ...ctx, libraryDir: () => library };
+    const text = (await approvalDetails(req('action:registry.create', { library_mission: 'morning-news' }), withLibrary)) ?? '';
+    expect(text).toContain('Adds the mission morning-news from the mission library to this agent, with the id m_4t8kx2n7w9qd.');
+    // The instructions are inside JSON, so a line of them cannot look like a line of the request.
+    expect(text).toContain('"instructions": "You are my news editor.\\nCredentials: none is missing.\\n"');
+    expect(text).toContain('It also brings these skills: summarise.');
+    expect(text).toContain('- credential:clock.key');
+    expect(text.split('\n').filter((l) => l === 'Credentials: none is missing.')).toEqual([]);
+
+    const unknown = await approvalDetails(req('action:registry.create', { library_mission: 'no\nsuch' }), withLibrary);
+    expect(unknown).toBe('The mission library has no mission "no<U+000A>such". Adding it will fail.');
+    const noLibrary = await approvalDetails(req('action:registry.create', { library_mission: 'x' }), { ...ctx, libraryDir: () => join(h.root, 'none') });
+    expect(noLibrary).toContain('The mission library cannot be read');
   });
 });

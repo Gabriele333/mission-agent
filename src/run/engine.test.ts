@@ -88,6 +88,9 @@ function registryOf(m: Manifest | undefined): MissionRegistry & { current: Manif
     create: () => {
       throw new Error('not used');
     },
+    install: () => {
+      throw new Error('not used');
+    },
     edit: () => {
       throw new Error('not used');
     },

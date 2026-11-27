@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -481,5 +481,97 @@ describe('watch', () => {
     expect(registry.get(EXAMPLE_ID)?.version).toBe(4);
     expect(calls).toBe(2);
     registry.stopWatching();
+  });
+});
+
+describe('install: a mission that comes with its own id and files', () => {
+  const ID = 'm_4t8kx2n7w9qd';
+  const TEXT = `id: ${ID}            # the id of the published mission
+name: morning-news
+description: Sends a short summary of the news every morning
+version: 1
+status: active
+
+triggers:
+  - use: trigger:chat
+
+tools:
+  - tool:web_search
+
+context:
+  instructions: |
+    You are my news editor.
+
+signals: []
+gates: []
+`;
+  let source: string;
+
+  beforeEach(() => {
+    source = mkdtempSync(join(tmpdir(), 'mission-agent-source-'));
+    writeFileSync(join(source, 'manifest.yaml'), TEXT);
+    writeFileSync(join(source, 'README.md'), '# Morning news\n');
+    mkdirSync(join(source, 'skills', 'summarise'), { recursive: true });
+    writeFileSync(join(source, 'skills', 'summarise', 'SKILL.md'), 'How to summarise.\n');
+  });
+  afterEach(() => rmSync(source, { recursive: true, force: true }));
+
+  it('copies the manifest as it is, the README and the skills, under the id of the manifest', () => {
+    const added = registry.install(source);
+    expect(added).toMatchObject({ id: ID, name: 'morning-news', version: 1, status: 'active' });
+    expect(readManifestText(ID)).toBe(TEXT);
+    expect(readFileSync(join(paths.missionDir(ID), 'README.md'), 'utf8')).toBe('# Morning news\n');
+    expect(readFileSync(join(paths.skillsDir(ID), 'summarise', 'SKILL.md'), 'utf8')).toBe('How to summarise.\n');
+    expect(existsSync(paths.memoryIndexFile(ID))).toBe(true);
+    expect(existsSync(paths.dataDir(ID))).toBe(true);
+    expect(registry.get(ID)?.name).toBe('morning-news');
+    expect(registry.errors()).toEqual([]);
+    // The next scan does not take the new file for a changed one.
+    registry.reload();
+    expect(versionInFile(ID)).toBe(1);
+  });
+
+  it('refuses a mission that the agent already has, and a name that is in use', () => {
+    registry.install(source);
+    expect(() => registry.install(source)).toThrow(/already has a mission with the id m_4t8kx2n7w9qd, named morning-news/);
+
+    writeFileSync(join(source, 'manifest.yaml'), TEXT.replace(ID, 'm_000000000000'));
+    expect(() => registry.install(source)).toThrow(/name "morning-news" is already used/);
+    expect(existsSync(paths.missionDir('m_000000000000'))).toBe(false);
+  });
+
+  it('refuses an invalid manifest, a system id, an allow gate and a folder without a manifest, and writes nothing', () => {
+    registry.reload();
+    const before = readdirSync(paths.missionsDir).sort();
+    // Each entry: a manifest text, and the error class or the message that it must give.
+    const bad: [string, unknown][] = [
+      [TEXT.replace('tool:web_search', 'tool:nope'), ManifestValidationError],
+      [TEXT.replace(ID, 'sys-general'), SystemMissionError],
+      [TEXT.replace(ID, 'm_short'), ManifestValidationError],
+      [TEXT.replace('gates: []', 'gates:\n  - use: gate:allow\n    for: action:web.search'), /must have no gate:allow/],
+      ['name: [', ManifestValidationError],
+    ];
+    for (const [text, error] of bad) {
+      writeFileSync(join(source, 'manifest.yaml'), text);
+      expect(() => registry.install(source), text.slice(0, 40)).toThrow(error as RegExp);
+    }
+    rmSync(join(source, 'manifest.yaml'));
+    expect(() => registry.install(source)).toThrow(MissionNotFoundError);
+    registry.reload();
+    expect(readdirSync(paths.missionsDir).sort()).toEqual(before);
+  });
+
+  it('copies no link, so nothing outside the published folder reaches the agent', () => {
+    const outside = join(source, '..', `outside-${ID}.txt`);
+    writeFileSync(outside, 'not part of the mission');
+    try {
+      symlinkSync(outside, join(source, 'skills', 'summarise', 'link.txt'));
+      symlinkSync(join(source, 'skills', 'summarise'), join(source, 'skills', 'linked-skill'));
+      registry.install(source);
+      expect(readdirSync(paths.skillsDir(ID))).toEqual(['summarise']);
+      expect(readdirSync(join(paths.skillsDir(ID), 'summarise'))).toEqual(['SKILL.md']);
+    } finally {
+      rmSync(outside, { force: true });
+    }
   });
 });

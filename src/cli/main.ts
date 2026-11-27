@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { ConfigError, defaultConfig, initRootFolder, loadConfig, writeConfig } from '../config/index.js';
 import { openStoreReadOnly } from '../db/index.js';
@@ -17,8 +18,17 @@ import {
   type HarnessOptions,
   type HarnessStatus,
 } from '../harness/index.js';
+import { findLibraryMission, LibraryMissingError, readLibrary } from '../library/index.js';
+import {
+  createMissionRegistry,
+  ManifestValidationError,
+  MISSION_ADMIN_MANIFEST,
+  MissionNotFoundError,
+  SystemMissionError,
+} from '../manifest/index.js';
 import { attachPages, DASHBOARD_PATH, SETUP_PATH } from '../pages/index.js';
 import { DEFAULT_ROOT, pathsFor, type Paths } from '../paths.js';
+import { libraryDir, programDir, programVersion } from '../program.js';
 import { loginHelp } from '../run/index.js';
 import {
   createKeychainStore,
@@ -35,17 +45,20 @@ import {
 import { isServerAlive, pageUrl, readServerFile, serverUrl, type ServerInfo } from '../server/index.js';
 import {
   installService,
+  otherServiceFiles,
   ServiceError,
   servicePlan,
   serviceStatus,
+  stableNodePath,
   uninstallService,
   type ServiceOptions,
   type ServicePlan,
 } from '../service/index.js';
-import { shellQuote } from '../pages/setup-routes.js';
+import { shellQuote } from '../shell.js';
 import { ChatClientError, runChatClient } from '../surfaces/terminal/index.js';
 import type { AgentConfig, SecretStore } from '../types.js';
-import { readMissionsFromFiles, requiredFromFiles } from './offline.js';
+import { checkForRelease, execCommand, runUpdate, UpdateError, type CommandRunner, type ReleaseCheck } from '../update/index.js';
+import { codeCatalog, readMissionsFromFiles, requiredFromFiles } from './offline.js';
 
 /** The `mission-agent` program (§A.5, §J.3). `main` returns the exit code. */
 
@@ -63,6 +76,14 @@ export interface CliIo {
   openUrl?: (url: string) => Promise<void>;
   /** Replaces parts of the service options, such as the launchctl runner. For tests. */
   serviceOptions?: Omit<ServiceOptions, 'root'>;
+  /** The folder of the installed program. Default: the one that holds this module. */
+  programDir?: string;
+  /** The folder of the mission library. Default: `mission-library/` in the program folder. */
+  libraryDir?: string;
+  /** Runs `git`, `npm` and `node` for the release check and the update. Default: the real programs. */
+  runCommand?: CommandRunner;
+  /** Looks for a newer release once a day while `start` runs. Default: `checkForRelease`. */
+  releaseCheck?: () => Promise<ReleaseCheck>;
 }
 
 /** An expected error: its message is printed without a stack trace. */
@@ -95,9 +116,16 @@ Commands:
                               at login. Needs --root. It shows what it writes before it writes it.
   service uninstall           Stop and remove the service. Needs --root.
   service status              Show whether the service is installed and running. Needs --root.
+  library list                Show the missions of the mission library that comes with the program.
+  library add <name> [--yes]  Copy one mission of the library into this agent. It shows the mission
+                              and asks before it copies. With --yes, it does not ask.
+  update [--yes]              Install the newest release of the program. Needs --root. It stops the
+                              harness, copies the root folder, installs the release and starts the
+                              harness again. With --yes, it does not ask.
 
 Options:
   --root <path>   The agent's root folder. Default: ~/mission-agent. The service commands need it.
+  --version       Show the version of the program.
   -h, --help      Show this help.`;
 
 const OPTIONS = {
@@ -107,6 +135,8 @@ const OPTIONS = {
   login: { type: 'string' },
   'telegram-user-id': { type: 'string' },
   'no-open': { type: 'boolean' },
+  yes: { type: 'boolean' },
+  version: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const;
 
@@ -117,6 +147,8 @@ type Values = {
   login?: string | undefined;
   'telegram-user-id'?: string | undefined;
   'no-open'?: boolean | undefined;
+  yes?: boolean | undefined;
+  version?: boolean | undefined;
   help?: boolean | undefined;
 };
 
@@ -131,6 +163,8 @@ const COMMAND_OPTIONS: Record<string, (keyof Values)[]> = {
   setup: ['no-open'],
   dashboard: ['no-open'],
   service: [],
+  library: ['yes'],
+  update: ['yes'],
 };
 
 function expandRoot(raw: string | undefined): string {
@@ -161,6 +195,10 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
   }
 
   const command = positionals[0];
+  if (values.version === true && values.help !== true) {
+    out(programVersion(io.programDir ?? programDir()) ?? 'unknown');
+    return 0;
+  }
   if (values.help === true || command === undefined || command === 'help') {
     out(USAGE);
     return command === undefined && values.help !== true ? 2 : 0;
@@ -170,7 +208,7 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
     err(`Unknown command "${command}". Run "mission-agent --help" to see the commands.`);
     return 2;
   }
-  for (const key of ['name', 'surface', 'login', 'telegram-user-id', 'no-open'] as const) {
+  for (const key of ['name', 'surface', 'login', 'telegram-user-id', 'no-open', 'yes'] as const) {
     if (values[key] !== undefined && !allowed.includes(key)) {
       err(`The option --${key} is not used by the ${command} command.`);
       return 2;
@@ -206,6 +244,11 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
         return await pageCommand(paths, rootFlag, command, values['no-open'] === true, io, out);
       case 'service':
         return await serviceCommand(paths, positionals, values.root !== undefined, io, out);
+      case 'library':
+        return await libraryCommand(paths, positionals, rootFlag, values.yes === true, io, out);
+      case 'update':
+        expectArgs(positionals, 1, 'update');
+        return await updateCommand(paths, values.root !== undefined, values.yes === true, io, out);
       default:
         return 2;
     }
@@ -219,7 +262,12 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
       e instanceof InvalidCredentialIdError ||
       e instanceof KeychainUnavailableError ||
       e instanceof ConfigError ||
-      e instanceof ServiceError
+      e instanceof ServiceError ||
+      e instanceof UpdateError ||
+      e instanceof LibraryMissingError ||
+      e instanceof ManifestValidationError ||
+      e instanceof MissionNotFoundError ||
+      e instanceof SystemMissionError
     ) {
       err(e.message);
       return 1;
@@ -286,7 +334,9 @@ async function startCommand(
   }
   const make = io.createHarness ?? createHarness;
   const log = (text: string) => io.stderr.write(`${new Date().toISOString()} ${text}\n`);
-  const harness = make({ root: paths.root, log });
+  const dir = io.programDir ?? programDir();
+  const releaseCheck = io.releaseCheck ?? (() => checkForRelease({ programDir: dir, ...(io.runCommand ? { run: io.runCommand } : {}) }));
+  const harness = make({ root: paths.root, log, releaseCheck });
   // The setup page and the dashboard are served by this harness (§J).
   attachPages(harness, { log, ...(io.serviceOptions !== undefined ? { service: io.serviceOptions } : {}) });
   try {
@@ -300,7 +350,7 @@ async function startCommand(
     return 1;
   }
   const st = harness.status();
-  out(`The harness is running for ${paths.root} (process ${st.pid}).`);
+  out(`The harness is running for ${paths.root} (process ${st.pid}${st.version !== undefined ? `, version ${st.version}` : ''}).`);
   out(st.paused ? `It started paused. ${st.pauseReason}` : 'It is not paused.');
   out(`Chat with it from another terminal: mission-agent chat${rootFlag}`);
   out(`Open the setup page: mission-agent setup${rootFlag}    The dashboard: mission-agent dashboard${rootFlag}`);
@@ -378,6 +428,7 @@ async function statusCommand(paths: Paths, rootFlag: string, out: (line: string)
   if (info !== undefined) {
     const st = (await askHarness(info, 'GET', STATUS_PATH)) as HarnessStatus;
     out(`The harness is running for ${paths.root} (process ${st.pid}, started at ${st.startedAt ?? 'an unknown time'}).`);
+    if (st.version !== undefined) out(`It is version ${st.version} of the program.`);
     out(st.paused ? `It is paused. ${st.pauseReason}` : 'It is not paused.');
     if (st.configError !== undefined) out(`agent.yaml has a problem: ${st.configError}`);
     printMissions(
@@ -540,6 +591,13 @@ async function pageCommand(
 
 // ---------------------------------------------------------------- service
 
+/** What a held back start means for the user. launchd's log calls the state "on-demand-only mode". */
+const HELD_BACK_HELP = [
+  'In this state of your login session, launchd starts no service by itself.',
+  'So it does not start the harness again after a crash, until the state ends.',
+  'If "mission-agent service status" still shows this later, log out of macOS and log in again, then check again.',
+];
+
 function printPlan(plan: ServicePlan, out: (line: string) => void): void {
   out(`The service for the root folder ${plan.root}:`);
   out(`  File:     ${plan.plistPath}`);
@@ -575,6 +633,11 @@ async function serviceCommand(
     out(`  File:     ${st.plistPath} (${st.installed ? 'present' : 'not present'})`);
     if (!st.loaded) out('  launchd:  not loaded');
     else out(`  launchd:  loaded, ${st.state ?? 'state unknown'}${st.pid !== undefined ? `, process ${st.pid}` : ''}`);
+    if (st.heldBack !== undefined) {
+      out(`  launchd holds back the start of this service (it reports: pended nondemand spawn = ${st.heldBack}).`);
+      for (const line of HELD_BACK_HELP) out(`  ${line}`);
+      out(`  To start it now: launchctl kickstart gui/${process.getuid?.() ?? '<uid>'}/${st.label}`);
+    }
     return 0;
   }
 
@@ -585,6 +648,12 @@ async function serviceCommand(
     const result = await installService(options);
     out(result.replaced ? 'The old service was removed, and the new one is installed and loaded.' : 'The service is installed and loaded.');
     out(`It starts the harness now and at each login. Check it with: mission-agent service status --root ${shellQuote(plan.root)}`);
+    if (result.startError !== undefined) out(`launchctl could not start it now: ${result.startError}`);
+    if (result.heldBack) {
+      out('');
+      out('Warning: launchd held back the start of the service, so this command started the harness itself.');
+      for (const line of HELD_BACK_HELP) out(line);
+    }
     return 0;
   }
 
@@ -593,4 +662,152 @@ async function serviceCommand(
   if (!result.wasLoaded && !result.removedFile) out('The service was not installed. Nothing was changed.');
   else out(`The service is removed.${result.wasLoaded ? ' It stopped the harness it ran.' : ''}`);
   return 0;
+}
+
+// ---------------------------------------------------------------- questions
+
+/** Asks a yes or no question and reads one line. Anything other than y or yes is a no. */
+function askYesNo(question: string, io: CliIo): Promise<boolean> {
+  return new Promise((resolveAnswer) => {
+    const rl = createInterface({ input: io.stdin ?? process.stdin, output: io.stderr, terminal: false });
+    let answered = false;
+    const done = (answer: string) => {
+      if (answered) return;
+      answered = true;
+      rl.close();
+      resolveAnswer(/^(y|yes)$/i.test(answer.trim()));
+    };
+    io.stderr.write(question);
+    rl.once('line', done);
+    // Input that ends without a line is a no.
+    rl.once('close', () => done(''));
+  });
+}
+
+// ---------------------------------------------------------------- library
+
+async function libraryCommand(
+  paths: Paths,
+  positionals: string[],
+  rootFlag: string,
+  yes: boolean,
+  io: CliIo,
+  out: (line: string) => void,
+): Promise<number> {
+  const sub = positionals[1];
+  if (sub !== 'list' && sub !== 'add') {
+    throw new CliError('Use one of: mission-agent library list, library add <name>', 2);
+  }
+  const library = readLibrary(io.libraryDir ?? libraryDir(io.programDir ?? programDir()));
+
+  if (sub === 'list') {
+    expectArgs(positionals, 2, 'library list');
+    if (yes) throw new CliError('The option --yes is not used by library list.', 2);
+    if (library.missions.length === 0) out('The mission library holds no mission.');
+    else {
+      out('Missions of the library. "yes" means that this agent already has the mission.');
+      const width = Math.max(...library.missions.map((m) => m.folder.length), 4);
+      out(`  ${'Name'.padEnd(width)}  Here  What it is for`);
+      for (const m of library.missions) {
+        const here = existsSync(paths.missionDir(m.manifest.id)) ? 'yes ' : 'no  ';
+        out(`  ${m.folder.padEnd(width)}  ${here}  ${m.manifest.description}`);
+      }
+      out(`Add one with: mission-agent library add <name>${rootFlag}`);
+    }
+    if (library.problems.length > 0) {
+      out('Folders of the library that cannot be used:');
+      for (const p of library.problems) out(`  ${p}`);
+    }
+    return 0;
+  }
+
+  const name = positionals[2];
+  if (name === undefined) throw new CliError('library add needs the name of a mission: mission-agent library add <name>', 2);
+  expectArgs(positionals, 3, 'library add');
+  const found = findLibraryMission(library, name);
+  if (found === undefined) {
+    throw new CliError(`The mission library has no mission "${name}". See the missions with: mission-agent library list${rootFlag}`);
+  }
+  if (!existsSync(paths.missionsDir)) {
+    throw new CliError(`${paths.root} is not the root folder of an agent yet. Start the agent once first: mission-agent start${rootFlag}`);
+  }
+  let config: AgentConfig;
+  try {
+    config = existsSync(paths.agentYaml) ? loadConfig(paths).config : defaultConfig('mission-agent');
+  } catch (e) {
+    throw new CliError(`A mission is checked against agent.yaml, which cannot be used: ${errorText(e)}`);
+  }
+
+  const m = found.manifest;
+  out(`Mission ${m.name} (${m.id}): ${m.description}`);
+  out(`  It runs on:   ${m.triggers.map((t) => JSON.stringify(t)).join(', ') || 'nothing'}`);
+  out(`  Its tools:    ${m.tools.join(', ') || 'none besides the ones every mission has'}`);
+  if (found.skills.length > 0) out(`  Its skills:   ${found.skills.join(', ')}`);
+  out('  What the model is told on every run:');
+  for (const line of m.context.instructions.trimEnd().split('\n')) out(`    ${line}`);
+  out(`It is copied to ${paths.missionDir(m.id)}. After the copy it belongs to this agent.`);
+  if (!yes && !(await askYesNo('Add this mission? [y/N] ', io))) {
+    out('Nothing was changed.');
+    return 0;
+  }
+
+  // The registry checks the manifest and copies the files. A running harness finds the new folder itself.
+  const hashes = new Map<string, string>();
+  const registry = createMissionRegistry({
+    paths,
+    catalog: codeCatalog(paths, config),
+    config: () => config,
+    codeManifests: [MISSION_ADMIN_MANIFEST],
+    memory: { get: (k) => hashes.get(k), set: (k, v) => void hashes.set(k, v) },
+  });
+  const added = registry.install(found.dir);
+  out(`Added the mission ${added.name}.`);
+  const required = requiredFromFiles(paths, config);
+  const store = (io.secretStore ?? (() => createKeychainStore()))();
+  const missing: string[] = [];
+  for (const id of required) {
+    try {
+      if (!(await store.has(id))) missing.push(id);
+    } catch {
+      // The Keychain could not be asked. `secret list` shows the same information.
+      break;
+    }
+  }
+  for (const id of missing) out(`A credential that this agent needs has no value yet: mission-agent secret set ${id}${rootFlag}`);
+  out((await runningHarness(paths)) !== undefined ? 'The running harness loads it within a few seconds.' : 'The harness loads it at its next start.');
+  return 0;
+}
+
+// ---------------------------------------------------------------- update
+
+async function updateCommand(paths: Paths, rootGiven: boolean, yes: boolean, io: CliIo, out: (line: string) => void): Promise<number> {
+  // The update copies the root folder and restarts its harness, so the folder is never assumed.
+  if (!rootGiven) throw new CliError("update needs the agent's root folder: mission-agent update --root <path>", 2);
+  const options: ServiceOptions = { ...io.serviceOptions, root: paths.root };
+  return runUpdate({
+    programDir: io.programDir ?? programDir(),
+    paths,
+    run: io.runCommand ?? execCommand,
+    nodePath: io.serviceOptions?.nodePath ?? stableNodePath(),
+    service: {
+      status: () => serviceStatus(options),
+      install: async () => void (await installService(options)),
+      uninstall: async () => void (await uninstallService(options)),
+      others: () => otherServiceFiles(options),
+    },
+    async findHarness() {
+      const info = await runningHarness(paths);
+      if (info === undefined) return undefined;
+      try {
+        const st = (await askHarness(info, 'GET', STATUS_PATH)) as HarnessStatus;
+        return st.version === undefined ? { pid: info.pid } : { pid: info.pid, version: st.version };
+      } catch {
+        return { pid: info.pid };
+      }
+    },
+    confirm: (question) => (yes ? Promise.resolve(true) : askYesNo(question, io)),
+    out,
+    now: () => new Date(),
+    sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+  });
 }

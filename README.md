@@ -19,25 +19,28 @@ Built and tested:
 - The mission admin, a system mission that creates, edits, freezes and deletes missions from the chat. Every change waits for your approval.
 - Secrets in the macOS Keychain.
 - A chat in the terminal, a setup page and a dashboard. All three are local.
+- The mission library: the `library` commands, and the mission admin's tools that list, read and add a published mission.
+- The install script, the `update` command and the daily check for a newer release. They were run on one Mac against a test repository, with real `git`, `npm` and `launchctl`.
 
 Built, but never run against the real service:
 
 - The Telegram surface. Its tests use a fake Bot API. It has never met a real bot.
-- The macOS service (a LaunchAgent). Its tests use a fake `launchctl`.
+- The start of the macOS service at login, and its restart after a crash. Installing, starting, stopping and removing the service were run with the real `launchctl`. The restart after a crash could not be checked: on the test Mac, launchd started no service by itself ([Install](docs/install.md), "Start at login").
 - The two web pages. Their scripts are tested in a fake DOM, and no person has looked at them in a browser.
 
 Not built yet:
 
 - The self-improvement loop of the design (chapter I), signals and the rating buttons.
 - Any tool for an outside system, such as mail or a calendar. A developer adds a tool as code (design, §A.5).
-- The `update` command, the data format number, and the `tools/` and `triggers/` folders for a user's own code (design, chapter 7).
+- A first release. Until a release tag exists, the install script and the `update` command have nothing to install.
+- The data format number, and the `tools/` and `triggers/` folders for a user's own code (design, chapter 7).
 
 ## Documentation
 
-- [Install](docs/install.md): what you need, and how to get the agent running.
+- [Install](docs/install.md): what you need, the install script, and the service that starts the agent at login.
 - [Configure](docs/configure.md): the model login, the secrets, Telegram and the missions.
 - [Update](docs/update.md): how to move to a newer version, and how to go back.
-- [Mission library](mission-library/README.md): missions that people publish, and how to publish yours.
+- [Mission library](mission-library/README.md): missions that people publish, how to add one to your agent, and how to publish yours.
 - [Design](docs/design.md): how the harness works, and why.
 
 You can use an API key, or your own Claude plan. Your use of Claude through this harness is under your own agreement with Anthropic. Anthropic has not reviewed this project, and nothing here is a statement by Anthropic.
@@ -48,6 +51,13 @@ You can use an API key, or your own Claude plan. Your use of Claude through this
 npm test             # unit tests, with a fake model
 npm run typecheck
 npm run test:live    # calls the real model with your own login, and costs a little
+```
+
+The service has a test with the real `launchctl`. It installs and removes a service for a temporary folder:
+
+```
+npm run build
+MISSION_AGENT_LIVE=1 npx vitest run src/service/service.live.test.ts
 ```
 
 ## Layout of the code
@@ -65,9 +75,11 @@ npm run test:live    # calls the real model with your own login, and costs a lit
 | `src/server`, `src/surfaces` | The local connection, the terminal chat and the Telegram surface |
 | `src/harness` | Start-up, and the dispatcher that decides which run starts when |
 | `src/pages`, `src/service` | The setup page, the dashboard and the macOS service |
+| `src/update`, `src/library` | The release check, the `update` command and the reader of the mission library |
 | `src/cli` | The command line program |
 | `docs` | The documentation and the design |
-| `mission-library` | Missions that people publish. The program does not read it |
+| `mission-library` | Missions that people publish. The harness reads it, and copies a mission into an agent when asked |
+| `install.sh` | The install script |
 
 ## Licence
 

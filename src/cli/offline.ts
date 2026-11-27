@@ -4,9 +4,9 @@ import { defaultConfig } from '../config/index.js';
 import { requiredCredentialIds, type CredentialSources } from '../harness/index.js';
 import { isSystemMissionId, MISSION_ADMIN_MANIFEST, parseManifest } from '../manifest/index.js';
 import type { Paths } from '../paths.js';
-import { builtinTools, createToolCatalog } from '../tools/index.js';
+import { builtinTools, createCodeCatalog, createToolCatalog } from '../tools/index.js';
 import { chatTrigger, createTriggerCatalog, cronTrigger } from '../triggers/index.js';
-import type { AgentConfig, Manifest } from '../types.js';
+import type { AgentConfig, CodeCatalog, Manifest, ToolCatalog } from '../types.js';
 
 /**
  * What the command line program reads from the files when the harness is not running.
@@ -40,10 +40,9 @@ export function readMissionsFromFiles(paths: Pick<Paths, 'missionsDir'>): FileMi
   return { manifests, problems };
 }
 
-/** The tool and trigger declarations, built the same way as in the harness. */
-export function codeSources(paths: Paths, config: AgentConfig = defaultConfig('mission-agent')): CredentialSources {
+function buildCatalogs(paths: Paths, config: AgentConfig) {
   const triggers = [cronTrigger, chatTrigger];
-  const tools = createToolCatalog(
+  const tools: ToolCatalog = createToolCatalog(
     builtinTools({
       paths,
       config: () => config,
@@ -52,6 +51,17 @@ export function codeSources(paths: Paths, config: AgentConfig = defaultConfig('m
     }),
   );
   return { tools, triggers: createTriggerCatalog(triggers) };
+}
+
+/** The tool and trigger declarations, built the same way as in the harness. */
+export function codeSources(paths: Paths, config: AgentConfig = defaultConfig('mission-agent')): CredentialSources {
+  return buildCatalogs(paths, config);
+}
+
+/** The ids that a manifest can refer to, built the same way as in the harness. */
+export function codeCatalog(paths: Paths, config: AgentConfig): CodeCatalog {
+  const { tools, triggers } = buildCatalogs(paths, config);
+  return createCodeCatalog(tools, triggers);
 }
 
 /** The required credentials, computed from agent.yaml and the manifest files (§A.5). */

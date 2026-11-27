@@ -5,6 +5,7 @@ import { createConfigHolder, defaultConfig, initRootFolder } from '../config/ind
 import { openStore } from '../db/index.js';
 import { createMissionRegistry, MISSION_ADMIN_MANIFEST, type WatchingMissionRegistry } from '../manifest/index.js';
 import { pathsFor, type Paths } from '../paths.js';
+import { programVersion } from '../program.js';
 import {
   checkModelLogin,
   createModelCaller,
@@ -22,6 +23,7 @@ import {
   isCredentialId,
   TELEGRAM_BOT_TOKEN,
 } from '../secrets/index.js';
+import { shellQuote } from '../shell.js';
 import { createLocalServer, isServerAlive, readServerFile, type LocalServer } from '../server/index.js';
 import {
   checkBot,
@@ -36,6 +38,7 @@ import {
 import { createTerminalSurface, TERMINAL_SURFACE_ID, type TerminalSurface } from '../surfaces/terminal/index.js';
 import { builtinTools, createCodeCatalog, createToolCatalog } from '../tools/index.js';
 import { createTriage } from '../triage/index.js';
+import type { ReleaseCheck } from '../update/index.js';
 import {
   chatTrigger,
   createScheduler,
@@ -107,6 +110,13 @@ export interface HarnessOptions {
   timeZone?: string;
   /** Replaces `fetch` for the bot check and the pairing of the setup page. For tests. */
   telegramFetch?: FetchFn;
+  /**
+   * Looks for a newer release (chapter 7.4). Without it the harness never looks. The command
+   * line program sets it, so a harness built in a test contacts nothing.
+   */
+  releaseCheck?: () => Promise<ReleaseCheck>;
+  /** Time between two looks at whether a check is due. Default one hour. A check is due once a day. */
+  releaseCheckPollMs?: number;
 }
 
 /** A timer run that was missed while the harness was stopped (§B.2), as the scheduler reported it at the start. */
@@ -123,6 +133,8 @@ export interface MissedTimerRun {
 export interface HarnessStatus {
   running: boolean;
   pid: number;
+  /** The version of the program that runs, from its `package.json`. */
+  version?: string;
   startedAt?: string;
   paused: boolean;
   /** Empty when the agent is not paused. */
@@ -208,6 +220,9 @@ const CONFIG_FILES = ['agent.yaml', 'core-prompt.md', 'note-paragraph.md'];
 const CRASH_TEXT =
   'The harness stopped unexpectedly three times within ten minutes, so it started paused. ' +
   'Remove the cause, then send /resume.';
+
+/** A check for a newer release is due when the last one that got an answer is this old. */
+const RELEASE_CHECK_EVERY_MS = 24 * 60 * 60_000;
 
 export const STATUS_PATH = '/api/status';
 export const SECRETS_REQUIRED_PATH = '/api/secrets/required';
@@ -771,6 +786,41 @@ export function createHarness(options: HarnessOptions): Harness {
 
   let scheduler: Scheduler | undefined;
   let aliveTimer: ReturnType<typeof setInterval> | undefined;
+  let releaseTimer: ReturnType<typeof setInterval> | undefined;
+  const version = programVersion();
+  let releaseProblem: string | undefined;
+
+  /**
+   * Once a day, looks for a newer release and tells the user about each one once (chapter 7.4).
+   * The harness never installs it: the user runs the `update` command.
+   */
+  async function lookForRelease(): Promise<void> {
+    const check = options.releaseCheck;
+    if (check === undefined || !running) return;
+    const last = Date.parse(store.getState(STATE_KEYS.releaseCheckedAt) ?? '');
+    const sinceLast = now().getTime() - last;
+    if (Number.isFinite(last) && sinceLast >= 0 && sinceLast < RELEASE_CHECK_EVERY_MS) return;
+    const result = await check();
+    if (!running) return;
+    if (!result.ok) {
+      // A check that got no answer is tried again at the next look. Its reason is logged once.
+      if (result.reason !== releaseProblem) log(`The check for a newer release got no answer: ${result.reason}`);
+      releaseProblem = result.reason;
+      return;
+    }
+    releaseProblem = undefined;
+    store.setState(STATE_KEYS.releaseCheckedAt, now().toISOString());
+    if (!result.newer || store.getState(STATE_KEYS.releaseNoticed) === result.latest) return;
+    store.setState(STATE_KEYS.releaseNoticed, result.latest);
+    await dispatcher.notifyUser(
+      `Version ${result.latest} of the harness is available. This agent runs version ${result.current}. ` +
+        `To install it, run in a terminal: mission-agent update --root ${shellQuote(paths.root)}`,
+    );
+  }
+
+  function lookForReleaseSafely(): void {
+    lookForRelease().catch((err: unknown) => log(`The check for a newer release failed: ${errorText(err)}`));
+  }
   let running = false;
   let startedAt: string | undefined;
   let missed: MissedTimerRun[] = [];
@@ -804,6 +854,7 @@ export function createHarness(options: HarnessOptions): Harness {
         .map((m) => ({ id: m.id, name: m.name, status: m.status, version: m.version, running: busy.has(m.id) })),
       manifestErrors: registry.errors(),
     };
+    if (version !== undefined) out.version = version;
     if (startedAt !== undefined) out.startedAt = startedAt;
     if (loaded !== undefined) out.agentName = loaded.config.agentName;
     if (configError !== undefined) out.configError = configError;
@@ -942,6 +993,12 @@ export function createHarness(options: HarnessOptions): Harness {
       }
     }, options.aliveIntervalMs ?? 60_000);
     aliveTimer.unref();
+
+    if (options.releaseCheck !== undefined) {
+      releaseTimer = setInterval(lookForReleaseSafely, options.releaseCheckPollMs ?? 60 * 60_000);
+      releaseTimer.unref();
+      lookForReleaseSafely();
+    }
   }
 
   let storeOpen = true;
@@ -957,6 +1014,7 @@ export function createHarness(options: HarnessOptions): Harness {
     running = false;
     pairAbort?.abort();
     if (aliveTimer !== undefined) clearInterval(aliveTimer);
+    if (releaseTimer !== undefined) clearInterval(releaseTimer);
     if (configTimer !== undefined) clearTimeout(configTimer);
     configWatcher?.close();
     registry.stopWatching();

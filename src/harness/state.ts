@@ -16,6 +16,10 @@ export const STATE_KEYS = {
   runsInProgress: 'harness.runs_in_progress',
   /** The local date (YYYY-MM-DD) on which the user was told that the daily cost limit is reached (§D). */
   dailyLimitNoticedOn: 'daily_limit_noticed_on',
+  /** ISO time of the last check for a newer release that got an answer (chapter 7.4). */
+  releaseCheckedAt: 'release.checked_at',
+  /** The newest release that the user was told about, such as `0.2.0`. */
+  releaseNoticed: 'release.noticed',
 } as const;
 
 /** Keys that belong to one mission and are removed when it is deleted. */

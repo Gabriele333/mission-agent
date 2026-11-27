@@ -63,6 +63,7 @@ This document specifies the harness of a mission-driven personal agent.
   - [7.3 Data format](#73-data-format)
   - [7.4 Update](#74-update)
   - [7.5 A user's own tools and triggers](#75-a-users-own-tools-and-triggers)
+  - [7.6 Mission library](#76-mission-library)
 - [8 Future developments](#8-future-developments)
 
 ## 1 The struggles of a long-lived agent
@@ -737,6 +738,7 @@ Memory uses the SDK's auto memory: a folder of markdown notes with a `MEMORY.md`
 ```
 agent.yaml             ← the agent configuration (§A.1); it holds no secret value
 backups/               ← copies of memory, made before the pass changes it (§I.2); no run can read here
+  update/              ← copies of the root folder, made before an update (chapter 7.4)
 core/                  ← shared by every mission; no run can write here
   memory.md            ← core memory, added to every system prompt (§C.2)
   skills/              ← core skills (§A.3)
@@ -838,7 +840,14 @@ When the harness restarts, it cancels every action that was waiting, except a pr
 
 Every run writes one logbook row (§E.2.2) with its input, tools, tokens, cost and outcome, keyed by `mission_id`. Error capture and trace export are core and the same for every mission. When a run fails, the harness retries it once, in the same session, so the model sees what it already did. If it fails again, the harness tells the user in the chat and records the failure in the logbook row. A run stopped by a run limit (§D) is not retried, and the harness tells the user. The same applies when the model declines a request.
 
-**Keeping the harness running.** The harness is installed as a service of the operating system. On macOS it is a LaunchAgent of the user's account, so the Keychain is unlocked while it runs (§A.5). The service starts it when the user logs in and restarts it after a crash. Four rules apply at a start:
+**Keeping the harness running.** The harness is installed as a service of the operating system. On macOS it is a LaunchAgent of the user's account, so the Keychain is unlocked while it runs (§A.5). The service starts it when the user logs in and restarts it after a crash. Four rules apply to the service:
+
+- The `service install` command loads the service and then asks launchd to start it. It does not rely on launchd to start a newly loaded service.
+- A login session can be in a state in which launchd starts no service by itself. Its log calls this "on-demand-only mode". In this state it starts the harness neither at load nor after a crash. `service install` and `service status` report it.
+- The service file names the `node` program by a path that stays valid after an upgrade of Node.js, when the PATH holds one.
+- launchd gives the harness 30 seconds to stop before it kills it. A stop waits up to 20 seconds for the runs in progress, and a kill would count as a crash.
+
+Four rules apply at a start:
 
 - The harness state in the database is still there (§E.2.2): the sessions, the queues and the pause.
 - A run that was in progress when the harness stopped is not continued and not repeated, because it may already have acted. The harness records it as failed and tells the user.
@@ -1018,7 +1027,7 @@ The mission admin creates, edits, freezes and deletes the other missions. The us
 ```yaml
 id: sys-mission-admin
 name: sys-mission-admin
-description: Creates, edits, freezes and deletes missions
+description: Creates, edits, freezes and deletes missions, and adds missions from the mission library
 version: 1
 status: active
 
@@ -1027,7 +1036,8 @@ triggers:
 
 tools:
   - tool:mission_registry               # reserved: read, create, edit, freeze, delete manifests;
-                                        # list registered triggers, tools, signals and gates by id
+                                        # list registered triggers, tools, signals and gates by id;
+                                        # list, read and add the missions of the mission library
 
 context:
   instructions: |
@@ -1037,6 +1047,9 @@ context:
     signals and gates use only ids that exist in the registry. You
     write no code. The context holds the instructions. You may
     suggest the rating signal to the user.
+    A mission can also come from the mission library, the published
+    missions that come with the harness. You add one as it is
+    published, when the user asks for it.
     You cannot change the manifest of a system mission, your own
     included. You may suggest a change to the user, and a developer
     makes it.
@@ -1068,9 +1081,12 @@ The mission admin can edit the manifest of every mission except the three system
 Missions are managed through the mission admin. Create, edit and freeze are described in §A.4 (Lifecycle).
 
 - A mission can be created.
+- A mission can be added from the mission library ([chapter 7.6](#76-mission-library)).
 - A mission can be edited.
 - A mission can be frozen.
 - A mission can be deleted.
+
+Adding a mission from the library uses the create action, so it waits for the user's approval like any other creation. The request names the mission only. The harness adds the whole published manifest to the approval request, so the user approves the instructions before the mission exists.
 
 Delete removes the mission's folder, with its manifest, memory, skills and data. It also removes the mission's session, its waiting approvals and its Telegram thread with the messages in it. It removes no tool, no trigger and no credential from the harness.
 
@@ -1174,7 +1190,7 @@ The user installs the harness program and runs its `setup` command. No agent con
 2. The model login (§A.5): an API key, or the user's own Claude plan. The page stores an API key in the Keychain. For a plan, the page shows Anthropic's sign-in command, and the user runs it in a terminal. One of the two is required.
 3. Telegram, which the user can skip. The user creates a bot in Telegram and enters its token, which the page stores in the Keychain. The page then shows a code. The user sends the code to the bot, and the harness records the sender as the user's Telegram account (§F.1). Without Telegram, the default surface is the terminal.
 4. The limits and the models. The page shows the defaults of §A.1, and the user can keep them.
-5. The service. The page installs the harness as a service of the user's account, so that it starts at login (§H).
+5. The service. The page installs the harness as a service of the user's account, so that it starts at login (§H). When the install script installed it already (chapter 7.2), the page shows it as installed.
 
 The page saves each answer when the user gives it, so the user can close the page and continue later. The harness stays paused until the agent name is present and the model login is ready. It then ends the pause. If Telegram is set, the harness creates the threads of the three system missions (§F.1). The page then shows the two ways to reach the agent: the terminal and the Telegram bot.
 
@@ -1233,13 +1249,21 @@ The program and the agent's data are in two places. The program is the installed
 ### 7.1 Releases
 
 - A release is a version number in the program and a git tag with the same number, such as `v0.2.0`. Users install releases only, never the development branch.
-- Each release has notes. They say what changed and whether the data format changed.
+- Each release has notes. They say what changed and whether the data format changed. The notes are the message of the release's tag, so the `update` command can show them without another service.
 - Each release names one exact version of the Claude Agent SDK, because the harness depends on tested SDK behaviour (§3.3).
 - Before a release, the unit tests and the tests with the real model must pass.
 
 ### 7.2 Installation
 
-The user installs one release with one command of the package manager. The user then chooses the agent's root folder and runs the `setup` command with it ([chapter 5](#5-setup-page)). The harness never chooses the root folder of a service: the `service` commands need the path (§H).
+The user installs one release with one script, `install.sh`, which is in the repository. There are two ways to run it, and both run the same script: from a copy of the repository, or with one command that downloads it. The script does five things:
+
+1. It gets the newest release from the repository with git, and builds it, in one program folder. The path of that folder is the same for every version.
+2. It writes the `mission-agent` command.
+3. It asks for the agent's root folder. The harness never chooses the root folder of a service: the `service` commands need the path (§H).
+4. It says what the service is and asks before it installs it (§H). This is where the user allows the agent to start at login and after a crash. The service belongs to the user's account, so it needs no password.
+5. It opens the setup page ([chapter 5](#5-setup-page)).
+
+The script installs with git and not with a package manager. The release check and the update then read the same repository and the same tags (chapter 7.4).
 
 A developer of the harness installs a release in the same way, apart from the development copy. A development run uses a test root folder, never the root folder of a real agent.
 
@@ -1251,7 +1275,7 @@ A developer of the harness installs a release in the same way, apart from the de
 
 ### 7.4 Update
 
-The `update` command of the harness program updates the installed program. It does these steps in order:
+The `update` command of the harness program updates the installed program. It needs the agent's root folder, because it copies that folder and restarts its harness. It does these steps in order:
 
 1. It looks for a newer release, and shows its version and its notes.
 2. It asks the user to confirm.
@@ -1260,9 +1284,11 @@ The `update` command of the harness program updates the installed program. It do
 5. It installs the new release.
 6. It starts the harness, which migrates the data when the format number is higher (chapter 7.3).
 7. It checks that the harness answers and reports the new version.
-8. If a step from 5 to 7 fails, it installs the old release again, puts the copy back, starts the harness and tells the user.
+8. If a step from 5 to 7 fails, it installs the old release again, puts the copy back, starts the harness and tells the user. It puts the copy back only when the harness of the new release was started, because nothing else can have changed the root folder.
 
-The harness never updates itself. An update is new code with access to the user's credentials and tools, so a person starts it. Once a day the harness looks for a newer release, and tells the user in the chat when one exists. That check sends nothing about the user.
+The command refuses in three cases, before it changes anything. The program folder is not an installed release, such as a development copy. A harness for the root folder runs in a terminal and not as the service. Another agent on the machine runs the same program as a service.
+
+The harness never updates itself. An update is new code with access to the user's credentials and tools, so a person starts it. Once a day the harness looks for a newer release, and tells the user in the chat when one exists. It names each release once, with the command that installs it. The check asks the repository that the program was installed from for the names of its tags, with git. It sends nothing about the user.
 
 The service file names a path of the program that is the same for every version, so it stays valid after an update (§H).
 
@@ -1276,6 +1302,17 @@ An update replaces every file of the program, so code that a user adds cannot be
 - This code runs inside the harness, with the harness's own access. The harness does not isolate it. The user installs it at their own risk.
 - No run can read or write these folders (§E.2.1). The mission admin writes no code, so it cannot add one ([Mission admin](#42-mission-admin)).
 - The folders hold no secret value. A declaration names the credentials, and the values are in the Keychain (§A.5).
+
+### 7.6 Mission library
+
+The mission library is a folder of the repository, `mission-library/`, with one folder per published mission. Anyone can publish a mission there with a pull request. It is not part of the agent: the missions of one agent are in the `missions/` folder of its root, system missions included (§E.2.3).
+
+- A published mission holds a manifest, a text about it and optionally skills. It holds no code, no memory, no data and no secret value. Its manifest has no `gate:allow`, so whoever uses the mission decides which actions run without approval.
+- The tests of the repository check every published mission against the harness of the same commit. A release therefore holds only missions that its own harness can load.
+- The harness reads the library that came with the installed program. It does not read the repository at run time, so a newly published mission arrives with the next release.
+- A mission is added to an agent by a copy into `missions/`, under the id written in its manifest. From then on the copy belongs to the agent, and it is edited like any other mission. A later release does not change it.
+- There are two ways to add one. The user asks the mission admin in the chat, and approves the request ([Mission management](#421-mission-management)). Or the user runs the `library add` command, which shows the mission and asks first.
+- No link is copied, so nothing outside the published folder reaches the agent.
 
 ---
 

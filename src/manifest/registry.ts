@@ -1,5 +1,17 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  watch,
+  writeFileSync,
+  type FSWatcher,
+} from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { Paths } from '../paths.js';
@@ -291,6 +303,46 @@ export function createMissionRegistry(options: MissionRegistryOptions): Watching
     return structuredClone(manifest);
   }
 
+  function install(sourceDir: string): Manifest {
+    reload();
+    let text: string;
+    try {
+      text = readFileSync(join(sourceDir, MANIFEST_FILE), 'utf8');
+    } catch {
+      throw new MissionNotFoundError(`${sourceDir} holds no ${MANIFEST_FILE}.`);
+    }
+    const parsed = parseManifestText(text);
+    if (!parsed.ok) throw new ManifestValidationError(parsed.errors);
+    const { id } = parsed.manifest;
+    guardSystem(id, 'added');
+    if (!MISSION_ID_RE.test(id)) throw new ManifestValidationError([`id "${id}" is not the id of a mission.`]);
+    const present = valid.get(id);
+    if (present !== undefined || existsSync(paths.missionDir(id))) {
+      throw new ManifestValidationError([
+        `This agent already has a mission with the id ${id}${present === undefined ? '' : `, named ${present.name}`}. Nothing was added.`,
+      ]);
+    }
+    // Whoever uses a published mission decides which actions run without approval.
+    if (parsed.manifest.gates.some((g) => g.use === 'gate:allow')) {
+      throw new ManifestValidationError(['A mission that is added with its files must have no gate:allow.']);
+    }
+    const manifest = checkForWrite(manifestToPlain(parsed.manifest), undefined);
+    mkdirSync(paths.memoryDir(id), { recursive: true });
+    mkdirSync(paths.dataDir(id), { recursive: true });
+    mkdirSync(paths.skillsDir(id), { recursive: true });
+    writeFileSync(paths.memoryIndexFile(id), '');
+    // The file keeps its text, with its comments.
+    writeManifest(manifest, text);
+    // A link could lead outside the mission's folder, so none is copied.
+    const noLinks = (src: string) => !lstatSync(src).isSymbolicLink();
+    const readme = join(sourceDir, 'README.md');
+    if (existsSync(readme) && noLinks(readme)) cpSync(readme, join(paths.missionDir(id), 'README.md'));
+    const skills = join(sourceDir, 'skills');
+    if (existsSync(skills) && noLinks(skills)) cpSync(skills, paths.skillsDir(id), { recursive: true, filter: noLinks });
+    reload();
+    return structuredClone(manifest);
+  }
+
   function edit(id: MissionId, patch: Partial<ManifestDraft>, operation = 'edited'): Manifest {
     guardSystem(id, operation);
     reload();
@@ -354,6 +406,7 @@ export function createMissionRegistry(options: MissionRegistryOptions): Watching
       listeners.push(listener);
     },
     create,
+    install,
     edit: (id, patch) => edit(id, patch),
     setStatus: (id: MissionId, status: MissionStatus) => edit(id, { status }, status === 'frozen' ? 'frozen' : 'changed'),
     remove,

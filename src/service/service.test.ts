@@ -1,14 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildPlist, serviceLabel, xmlEscape } from './plist.js';
 import {
   installService,
+  otherServiceFiles,
   ServiceError,
   servicePlan,
   serviceStatus,
+  stableNodePath,
   uninstallService,
   type LaunchctlResult,
   type ServiceOptions,
@@ -55,6 +57,8 @@ function options(extra: Partial<ServiceOptions> = {}): ServiceOptions {
       calls.push(args);
       if (args[0] === 'print') return printAnswer;
       if (args[0] === 'bootstrap') return bootstrapAnswer;
+      // After a bootout, launchd no longer knows the service.
+      if (args[0] === 'bootout') printAnswer = NOT_FOUND;
       return OK;
     },
     ...extra,
@@ -85,11 +89,12 @@ describe('the plist', () => {
     >;
     expect(json).toEqual({
       Label: label(),
-      ProgramArguments: [process.execPath, cliPath, 'start', '--root', root],
+      ProgramArguments: [stableNodePath(process.execPath, '/opt/homebrew/bin:/usr/bin:/bin'), cliPath, 'start', '--root', root],
       WorkingDirectory: root,
       EnvironmentVariables: { PATH: '/opt/homebrew/bin:/usr/bin:/bin' },
       RunAtLoad: true,
       KeepAlive: { SuccessfulExit: false },
+      ExitTimeOut: 30,
       StandardOutPath: join(root, 'state', 'logs', 'harness.out.log'),
       StandardErrorPath: join(root, 'state', 'logs', 'harness.err.log'),
     });
@@ -117,13 +122,15 @@ describe('the plist', () => {
 });
 
 describe('installService', () => {
-  it('writes the plist, creates the log folder and loads it with launchctl bootstrap', async () => {
+  it('writes the plist, creates the log folder, loads it with launchctl bootstrap and starts it with kickstart', async () => {
     const result = await installService(options());
     expect(calls).toEqual([
       ['print', `gui/${UID}/${label()}`],
       ['bootstrap', `gui/${UID}`, plistFile()],
+      ['print', `gui/${UID}/${label()}`],
+      ['kickstart', `gui/${UID}/${label()}`],
     ]);
-    expect(result).toMatchObject({ replaced: false, handover: false });
+    expect(result).toEqual({ plan: result.plan, replaced: false, handover: false, heldBack: false });
     expect(readFileSync(plistFile(), 'utf8')).toBe(result.plan.plistText);
     expect(statSync(plistFile()).mode & 0o777).toBe(0o644);
     expect(existsSync(join(root, 'state', 'logs'))).toBe(true);
@@ -135,9 +142,63 @@ describe('installService', () => {
     expect(calls).toEqual([
       ['print', `gui/${UID}/${label()}`],
       ['bootout', `gui/${UID}/${label()}`],
+      ['print', `gui/${UID}/${label()}`],
       ['bootstrap', `gui/${UID}`, plistFile()],
+      ['print', `gui/${UID}/${label()}`],
+      ['kickstart', `gui/${UID}/${label()}`],
     ]);
     expect(result.replaced).toBe(true);
+  });
+
+  it('waits until launchd has removed the old service, and gives up after the wait', async () => {
+    const loaded = { code: 0, stdout: '\tstate = running\n\tpid = 4321\n', stderr: '' };
+    let printsAfterBootout = 0;
+    let booted = false;
+    const slow = (removedAfter: number) =>
+      options({
+        removalWaitMs: 500,
+        launchctl: async (args) => {
+          calls.push(args);
+          if (args[0] === 'bootout') booted = true;
+          if (args[0] === 'print') return booted && (printsAfterBootout += 1) > removedAfter ? NOT_FOUND : loaded;
+          return OK;
+        },
+      });
+    // launchd still knows the service at the first check, and no longer at the second.
+    await installService(slow(1));
+    expect(calls.map((c) => c[0])).toEqual(['print', 'bootout', 'print', 'print', 'bootstrap', 'print', 'kickstart']);
+
+    calls = [];
+    booted = false;
+    printsAfterBootout = 0;
+    await expect(uninstallService(slow(1000))).rejects.toThrow(/launchd did not remove the service in time/);
+    expect(existsSync(plistFile())).toBe(true);
+  });
+
+  it('reports a start that launchd held back, and a start that could not be asked for', async () => {
+    // What launchctl prints while the login session is in on-demand-only mode.
+    const held = `${label()} = {\n\tstate = not running\n\truns = 0\n\tpended nondemand spawn = speculative\n}\n`;
+    let prints = 0;
+    const result = await installService(
+      options({
+        launchctl: async (args) => {
+          calls.push(args);
+          if (args[0] === 'print') return (prints += 1) === 1 ? NOT_FOUND : { code: 0, stdout: held, stderr: '' };
+          if (args[0] === 'kickstart') return { code: 3, stdout: '', stderr: 'Could not kickstart service' };
+          return OK;
+        },
+      }),
+    );
+    expect(result.heldBack).toBe(true);
+    expect(result.startError).toBe('Could not kickstart service');
+    expect(await serviceStatus(options({ launchctl: async () => ({ code: 0, stdout: held, stderr: '' }) }))).toMatchObject({
+      loaded: true,
+      state: 'not running',
+      heldBack: 'speculative',
+    });
+    // A service that runs is not held back, whatever else launchctl prints.
+    const running = held.replace('state = not running', 'state = running\n\tpid = 12');
+    expect((await serviceStatus(options({ launchctl: async () => ({ code: 0, stdout: running, stderr: '' }) }))).heldBack).toBeUndefined();
   });
 
   it('refuses when the built cli.js cannot be found, and writes nothing', async () => {
@@ -198,9 +259,11 @@ describe('uninstallService and serviceStatus', () => {
     calls = [];
     printAnswer = { code: 0, stdout: '\tstate = running\n', stderr: '' };
     const result = await uninstallService(options());
+    // The print after the bootout checks that launchd has removed the service.
     expect(calls).toEqual([
       ['print', `gui/${UID}/${label()}`],
       ['bootout', `gui/${UID}/${label()}`],
+      ['print', `gui/${UID}/${label()}`],
     ]);
     expect(result).toEqual({ plan: { label: label(), plistPath: plistFile(), domain: `gui/${UID}` }, wasLoaded: true, removedFile: true });
     expect(existsSync(plistFile())).toBe(false);
@@ -210,5 +273,44 @@ describe('uninstallService and serviceStatus', () => {
     const result = await uninstallService(options());
     expect(result).toMatchObject({ wasLoaded: false, removedFile: false });
     expect(calls).toEqual([['print', `gui/${UID}/${label()}`]]);
+  });
+});
+
+describe('the node path of the service', () => {
+  it('is a node in a folder of the PATH that leads to the program that runs, so an upgrade of node keeps it valid', () => {
+    const real = realpathSync(process.execPath);
+    const other = join(tmp, 'other');
+    const bin = join(tmp, 'bin');
+    mkdirSync(other);
+    mkdirSync(bin);
+    writeFileSync(join(other, 'node'), '#!/bin/sh\n');
+    symlinkSync(real, join(bin, 'node'));
+    expect(stableNodePath(real, `relative:${join(tmp, 'missing')}:${other}:${bin}`)).toBe(join(bin, 'node'));
+  });
+
+  it('is the program that runs when no folder of the PATH leads to it', () => {
+    expect(stableNodePath(process.execPath, join(tmp, 'missing'))).toBe(process.execPath);
+    expect(stableNodePath(process.execPath, '')).toBe(process.execPath);
+    expect(stableNodePath(join(tmp, 'no-such-node'), '/usr/bin')).toBe(join(tmp, 'no-such-node'));
+  });
+});
+
+describe('other services of the same program', () => {
+  it('lists the service files of other root folders that run this built program, and not its own', async () => {
+    await installService(options());
+    const second = join(tmp, 'second');
+    mkdirSync(second);
+    await installService(options({ root: second }));
+    // A service of another copy of the program does not count.
+    const elsewhere = join(tmp, 'elsewhere');
+    mkdirSync(join(elsewhere, 'dist'), { recursive: true });
+    writeFileSync(join(elsewhere, 'dist', 'cli.js'), '// another copy\n');
+    const third = join(tmp, 'third');
+    mkdirSync(third);
+    await installService(options({ root: third, cliPath: join(elsewhere, 'dist', 'cli.js') }));
+    writeFileSync(join(agentsDir, 'com.example.other.plist'), cliPath);
+
+    expect(otherServiceFiles(options())).toEqual([join(agentsDir, `${serviceLabel(second)}.plist`)]);
+    expect(otherServiceFiles(options({ launchAgentsDir: join(tmp, 'none') }))).toEqual([]);
   });
 });
