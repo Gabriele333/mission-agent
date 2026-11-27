@@ -86,7 +86,8 @@ export const execFileRunner: SecurityRunner = (file, args, input) =>
   });
 
 export function createKeychainStore(options: KeychainStoreOptions = {}): SecretStore {
-  const service = options.service ?? DEFAULT_SERVICE;
+  // MISSION_AGENT_KEYCHAIN_SERVICE replaces the service name, so a test install never reads the real one.
+  const service = options.service ?? (process.env.MISSION_AGENT_KEYCHAIN_SERVICE || DEFAULT_SERVICE);
   const run = options.run ?? execFileRunner;
   const platform = options.platform ?? process.platform;
 

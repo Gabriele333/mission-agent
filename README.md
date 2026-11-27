@@ -21,7 +21,8 @@ Built and tested:
 - A chat in the terminal, a setup page and a dashboard. All three are local.
 - The mission library: the `library` commands, and the mission admin's tools that list, read and add a published mission.
 - The `check` command and the "Computer" part of the setup page. They read the settings of macOS that the agent depends on, and say what to change.
-- The install script, the `update` command and the daily check for a newer release. They were run on one Mac against a test repository, with real `git`, `npm` and `launchctl`.
+- The maintenance program, which installs, uninstalls, updates and repairs the program. It is copied outside the program folder, so it runs when the program is broken. A real install test runs the install script, git and npm against a test repository in every `npm test`. The update, a failed update, a killed update, a repair and the move from version 0.1.3 were also run on one Mac with a real service and the real `launchctl`.
+- The daily check for a newer release, and the Version part of the dashboard, with its buttons "Check for updates" and "Install".
 
 Built, but never run against the real service:
 
@@ -39,7 +40,7 @@ Not built yet:
 
 - [Install](docs/install.md): what you need, the install script, and the service that starts the agent at login.
 - [Configure](docs/configure.md): the model login, the secrets, Telegram and the missions.
-- [Update](docs/update.md): how to move to a newer version, and how to go back.
+- [Update](docs/update.md): how to move to a newer version, how to repair the program, and how to go back.
 - [Mission library](mission-library/README.md): missions that people publish, how to add one to your agent, and how to publish yours.
 - [Design](docs/design.md): how the harness works, and why.
 - [Security](SECURITY.md): how to report a problem, and what the harness does not protect against.
@@ -61,17 +62,16 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 ## Tests
 
 ```
-npm test             # unit tests, with a fake model
+npm test               # unit tests with a fake model, and the real install test (about a minute)
 npm run typecheck
-npm run test:live    # calls the real model with your own login, and costs a little
+npm run test:install   # the real install test alone
+npm run test:service   # the service with the real launchctl
+npm run test:live      # calls the real model with your own login, and costs a little
 ```
 
-The service has a test with the real `launchctl`. It installs and removes a service for a temporary folder:
+The real install test runs `install.sh`, git and npm against a repository that it makes in a temporary folder. It installs no service. It needs the packages in the npm cache, or the network.
 
-```
-npm run build
-MISSION_AGENT_LIVE=1 npx vitest run src/service/service.live.test.ts
-```
+The service test installs and removes a service for a temporary folder. Set `MISSION_AGENT_LAUNCH_AGENTS` to a temporary folder to keep its file out of `~/Library/LaunchAgents`.
 
 ## Layout of the code
 
@@ -88,12 +88,13 @@ MISSION_AGENT_LIVE=1 npx vitest run src/service/service.live.test.ts
 | `src/server`, `src/surfaces` | The local connection, the terminal chat and the Telegram surface |
 | `src/harness` | Start-up, and the dispatcher that decides which run starts when |
 | `src/pages`, `src/service` | The setup page, the dashboard and the macOS service |
-| `src/update`, `src/library` | The release check, the `update` command and the reader of the mission library |
+| `src/maintenance` | The maintenance program: install, uninstall, update, repair, and the progress page of an update |
+| `src/update`, `src/library` | The release check, the copies of the root folder made by an update, and the reader of the mission library |
 | `src/system` | The checks of the computer's settings |
 | `src/cli` | The command line program |
 | `docs` | The documentation and the design |
 | `mission-library` | Missions that people publish. The harness reads it, and copies a mission into an agent when asked |
-| `install.sh` | The install script |
+| `install.sh` | The install script. It checks what the program needs, then runs the maintenance program |
 
 ## Licence
 

@@ -1,11 +1,11 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { ConfigError, defaultConfig, initRootFolder, loadConfig, writeConfig } from '../config/index.js';
-import { openStoreReadOnly } from '../db/index.js';
+import { createMemoryStore, openStoreReadOnly } from '../db/index.js';
 import {
   createHarness,
   HarnessAlreadyRunningError,
@@ -29,7 +29,10 @@ import {
 import { attachPages, DASHBOARD_PATH, SETUP_PATH } from '../pages/index.js';
 import { DEFAULT_ROOT, pathsFor, type Paths } from '../paths.js';
 import { libraryDir, programDir, programVersion } from '../program.js';
-import { loginHelp } from '../run/index.js';
+import { loginHelp, shippedClaudeBinary } from '../run/index.js';
+import { INSTALL_COMMAND } from '../maintenance/files.js';
+import { selfHeal } from '../maintenance/heal.js';
+import { homeOfProgram, layoutFor } from '../maintenance/layout.js';
 import {
   createKeychainStore,
   InvalidCredentialIdError,
@@ -45,11 +48,9 @@ import {
 import { isServerAlive, pageUrl, readServerFile, serverUrl, type ServerInfo } from '../server/index.js';
 import {
   installService,
-  otherServiceFiles,
   ServiceError,
   servicePlan,
   serviceStatus,
-  stableNodePath,
   uninstallService,
   type ServiceOptions,
   type ServicePlan,
@@ -58,7 +59,7 @@ import { shellQuote } from '../shell.js';
 import { GROUP_TITLES, openChecks, runSystemChecks, type CheckGroup, type SystemCheck } from '../system/index.js';
 import { ChatClientError, runChatClient } from '../surfaces/terminal/index.js';
 import type { AgentConfig, SecretStore } from '../types.js';
-import { checkForRelease, execCommand, runUpdate, UpdateError, type CommandRunner, type ReleaseCheck } from '../update/index.js';
+import { checkForRelease, type CommandRunner, type ReleaseCheck } from '../update/index.js';
 import { codeCatalog, readMissionsFromFiles, requiredFromFiles } from './offline.js';
 
 /** The `mission-agent` program (§A.5, §J.3). `main` returns the exit code. */
@@ -85,6 +86,13 @@ export interface CliIo {
   runCommand?: CommandRunner;
   /** Looks for a newer release once a day while `start` runs. Default: `checkForRelease`. */
   releaseCheck?: () => Promise<ReleaseCheck>;
+  /**
+   * The home folder of the installed program. Default: the parent of the program folder, when
+   * that is `<home>/app`. Null: the program is a development copy.
+   */
+  home?: string | null;
+  /** Runs the maintenance program with this terminal and returns its exit code. For tests. */
+  runMaintenance?: (mainPath: string, args: string[]) => Promise<number>;
 }
 
 /** An expected error: its message is printed without a stack trace. */
@@ -126,9 +134,16 @@ Commands:
   library list                Show the missions of the mission library that comes with the program.
   library add <name> [--yes]  Copy one mission of the library into this agent. It shows the mission
                               and asks before it copies. With --yes, it does not ask.
-  update [--yes]              Install the newest release of the program. Needs --root. It stops the
-                              harness, copies the root folder, installs the release and starts the
-                              harness again. With --yes, it does not ask.
+  self-test                   Check that the program can run: its modules load, its database opens,
+                              and the Claude Code program of the SDK is present. It needs no network.
+
+The commands of the maintenance program. It is installed beside the program, so it runs when the
+program is broken. Run "mission-agent repair --help" to see their options.
+  update [--yes] [--version <vX.Y.Z>]
+                              Install a newer release. Needs --root. It builds and tests the release
+                              before it stops the harness, and goes back when a step fails.
+  repair [--yes]              Find what is wrong with the installed program and fix it.
+  uninstall [--wipe-data]     Remove the program and its services. The agent's data is kept.
 
 Options:
   --root <path>   The agent's root folder. Default: ~/mission-agent. The service commands need it.
@@ -175,9 +190,12 @@ const COMMAND_OPTIONS: Record<string, (keyof Values)[]> = {
   dashboard: ['no-open'],
   service: [],
   library: ['yes'],
-  update: ['yes'],
   check: ['unattended', 'guide'],
+  'self-test': [],
 };
+
+/** The commands of the maintenance program, which the program forwards to it (chapter 7.5). */
+const MAINTENANCE_COMMANDS = ['update', 'repair', 'uninstall', 'install'];
 
 function expandRoot(raw: string | undefined): string {
   if (raw === undefined || raw === '') return DEFAULT_ROOT;
@@ -193,6 +211,19 @@ function errorText(err: unknown): string {
 export async function main(argv: string[], io: CliIo): Promise<number> {
   const out = (line: string) => io.stdout.write(`${line}\n`);
   const err = (line: string) => io.stderr.write(`${line}\n`);
+
+  // The maintenance commands take options that the program does not know, so they are forwarded
+  // before the options are read.
+  const lenient = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: false });
+  const first = lenient.positionals[0];
+  if (first !== undefined && MAINTENANCE_COMMANDS.includes(first)) {
+    try {
+      return await forwardToMaintenance(argv, io, err);
+    } catch (e) {
+      err(`The maintenance program could not be started: ${errorText(e)}`);
+      return 1;
+    }
+  }
 
   let values: Values;
   let positionals: string[];
@@ -261,9 +292,9 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
       case 'check':
         expectArgs(positionals, 1, 'check');
         return await checkCommand(paths, values.unattended === true, values.guide === true, io, out);
-      case 'update':
-        expectArgs(positionals, 1, 'update');
-        return await updateCommand(paths, values.root !== undefined, values.yes === true, io, out);
+      case 'self-test':
+        expectArgs(positionals, 1, 'self-test');
+        return selfTestCommand(out, err);
       default:
         return 2;
     }
@@ -278,7 +309,6 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
       e instanceof KeychainUnavailableError ||
       e instanceof ConfigError ||
       e instanceof ServiceError ||
-      e instanceof UpdateError ||
       e instanceof LibraryMissingError ||
       e instanceof ManifestValidationError ||
       e instanceof MissionNotFoundError ||
@@ -350,11 +380,19 @@ async function startCommand(
   const make = io.createHarness ?? createHarness;
   const log = (text: string) => io.stderr.write(`${new Date().toISOString()} ${text}\n`);
   const dir = io.programDir ?? programDir();
-  const releaseCheck = io.releaseCheck ?? (() => checkForRelease({ programDir: dir, ...(io.runCommand ? { run: io.runCommand } : {}) }));
+  healInstall(io, log);
+  const releaseCheck =
+    io.releaseCheck ?? (() => checkForRelease({ programDir: dir, notes: true, ...(io.runCommand ? { run: io.runCommand } : {}) }));
   const harness = make({ root: paths.root, log, releaseCheck });
   // The setup page and the dashboard are served by this harness (§J).
+  const home = homeOf(io);
   attachPages(harness, {
     log,
+    update: {
+      programDir: dir,
+      home: home ?? null,
+      ...(io.runCommand !== undefined ? { run: io.runCommand } : {}),
+    },
     ...(io.serviceOptions !== undefined ? { service: io.serviceOptions } : {}),
     ...(io.runCommand !== undefined ? { system: { run: io.runCommand } } : {}),
     ...(io.openUrl !== undefined ? { openUrl: io.openUrl } : {}),
@@ -799,38 +837,77 @@ async function libraryCommand(
   return 0;
 }
 
-// ---------------------------------------------------------------- update
+// ---------------------------------------------------------------- the maintenance program
 
-async function updateCommand(paths: Paths, rootGiven: boolean, yes: boolean, io: CliIo, out: (line: string) => void): Promise<number> {
-  // The update copies the root folder and restarts its harness, so the folder is never assumed.
-  if (!rootGiven) throw new CliError("update needs the agent's root folder: mission-agent update --root <path>", 2);
-  const options: ServiceOptions = { ...io.serviceOptions, root: paths.root };
-  return runUpdate({
-    programDir: io.programDir ?? programDir(),
-    paths,
-    run: io.runCommand ?? execCommand,
-    nodePath: io.serviceOptions?.nodePath ?? stableNodePath(),
-    service: {
-      status: () => serviceStatus(options),
-      install: async () => void (await installService(options)),
-      uninstall: async () => void (await uninstallService(options)),
-      others: () => otherServiceFiles(options),
-    },
-    async findHarness() {
-      const info = await runningHarness(paths);
-      if (info === undefined) return undefined;
-      try {
-        const st = (await askHarness(info, 'GET', STATUS_PATH)) as HarnessStatus;
-        return st.version === undefined ? { pid: info.pid } : { pid: info.pid, version: st.version };
-      } catch {
-        return { pid: info.pid };
-      }
-    },
-    confirm: (question) => (yes ? Promise.resolve(true) : askYesNo(question, io)),
-    out,
-    now: () => new Date(),
-    sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+/** The home folder of the installed program, or undefined for a development copy. */
+function homeOf(io: CliIo): string | undefined {
+  if (io.home !== undefined) return io.home ?? undefined;
+  return homeOfProgram(io.programDir ?? programDir());
+}
+
+/**
+ * Writes the maintenance program and the command file when they are missing or of another version
+ * (chapter 7.5). An agent installed before they existed gets them here. It never stops a command.
+ */
+function healInstall(io: CliIo, log: (text: string) => void): void {
+  const home = homeOf(io);
+  if (home === undefined) return;
+  const dir = io.programDir ?? programDir();
+  try {
+    const healed = selfHeal(dir, programVersion(dir), home);
+    if (healed.skipped !== undefined) log(`The maintenance program was not checked: ${healed.skipped}.`);
+    for (const c of healed.changed) log(`Wrote ${c}.`);
+  } catch (e) {
+    log(`The maintenance program could not be written: ${errorText(e)}`);
+  }
+}
+
+function runAttached(mainPath: string, args: string[]): Promise<number> {
+  return new Promise((resolveRun) => {
+    const child = spawn(process.execPath, [mainPath, ...args], { stdio: 'inherit' });
+    child.once('error', () => resolveRun(127));
+    child.once('exit', (code) => resolveRun(code ?? 1));
   });
+}
+
+/** Sends `update`, `repair`, `uninstall` and `install` to the maintenance program, with this terminal. */
+async function forwardToMaintenance(argv: string[], io: CliIo, err: (line: string) => void): Promise<number> {
+  const home = homeOf(io);
+  if (home === undefined) {
+    err(
+      `The program in ${io.programDir ?? programDir()} is a development copy, not an installed program, so it has no maintenance program. ` +
+        'Update a development copy with git. To install the agent, run install.sh (see docs/install.md).',
+    );
+    return 1;
+  }
+  healInstall(io, err);
+  const mainPath = layoutFor(home).maintenanceMain;
+  if (!existsSync(mainPath)) {
+    err(`The maintenance program is missing in ${layoutFor(home).maintenance}, and the program could not write it.`);
+    err(`Run the install script again: ${INSTALL_COMMAND}`);
+    return 1;
+  }
+  return (io.runMaintenance ?? runAttached)(mainPath, ['--home', home, ...argv]);
+}
+
+/** The self-test (chapter 7.5): the modules load, a database opens in memory, and the SDK's program is present. No network. */
+function selfTestCommand(out: (line: string) => void, err: (line: string) => void): number {
+  const problems: string[] = [];
+  try {
+    const store = createMemoryStore();
+    store.close();
+  } catch (e) {
+    problems.push(`The database does not open: ${errorText(e)}`);
+  }
+  if (shippedClaudeBinary() === undefined) {
+    problems.push(`The Claude Code program of the SDK for ${process.platform}-${process.arch} is missing. Run "npm ci" in the program folder.`);
+  }
+  if (problems.length > 0) {
+    for (const p of problems) err(p);
+    return 1;
+  }
+  out(`The self-test passed: version ${programVersion() ?? 'unknown'}, Node.js ${process.versions.node}.`);
+  return 0;
 }
 
 // ---------------------------------------------------------------- check

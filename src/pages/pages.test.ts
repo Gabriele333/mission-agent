@@ -8,7 +8,8 @@ import { pathsFor } from '../paths.js';
 import { SYS_GENERAL, type RunRow } from '../types.js';
 import { COMMON_JS } from './assets/common.js';
 import { DASHBOARD_JS } from './assets/dashboard.js';
-import { DASHBOARD_HTML, SETUP_HTML } from './assets/html.js';
+import { DASHBOARD_HTML, PROGRESS_HTML, SETUP_HTML } from './assets/html.js';
+import { PROGRESS_JS } from './assets/progress.js';
 import { SETUP_JS } from './assets/setup.js';
 import { STYLE_CSS } from './assets/style.js';
 import { PAGE_CSP } from './index.js';
@@ -79,7 +80,7 @@ describe('the rules of both pages (§J.3)', () => {
     expect(PAGE_CSP).toBe(
       "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     );
-    for (const html of [SETUP_HTML, DASHBOARD_HTML]) {
+    for (const html of [SETUP_HTML, DASHBOARD_HTML, PROGRESS_HTML]) {
       const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
       expect(scripts.length).toBe(2);
       for (const s of scripts) {
@@ -97,7 +98,10 @@ describe('the rules of both pages (§J.3)', () => {
       ['common.js', COMMON_JS],
       ['setup.js', SETUP_JS],
       ['dashboard.js', DASHBOARD_JS],
+      ['progress.js', PROGRESS_JS],
     ] as const) {
+      // A backtick would start a template text in the TypeScript file that holds the script.
+      expect(code.includes('`'), `${name} holds a backtick`).toBe(false);
       for (const banned of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval', 'new Function', 'setAttribute(\'on', 'javascript:']) {
         expect(code.includes(banned), `${name} uses ${banned}`).toBe(false);
       }
@@ -132,15 +136,26 @@ describe('the rules of both pages (§J.3)', () => {
       'https://t.me/ada',
       'https://t.me/ada_bot/../x',
       'javascript:alert(1)',
+      'http://127.0.0.1:4999/other',
+      'http://127.0.0.1:4999/dashboard?token=a&x=1',
+      'http://localhost:4999/dashboard',
+      'http://127.0.0.1.example.com:4999/dashboard',
     ]) {
       expect(() => el('a', { href: bad }), bad).toThrow('an outside link is not allowed');
     }
+    // The progress page of an update links to the dashboard of the new harness, on this computer, in the same tab.
+    expect(attrs(el('a', { href: 'http://127.0.0.1:4999/dashboard?token=abc_DEF-1' }))).toEqual({ href: 'http://127.0.0.1:4999/dashboard?token=abc_DEF-1', rel: 'noreferrer' });
+  });
+
+  it('has exactly two routes that change something from the dashboard: the buttons of the Version part', async () => {
+    const r = await rig();
+    expect(r.pages.routes.filter((x) => x.page === 'update').map((x) => `${x.method} ${x.path}`)).toEqual(['POST /api/update/check', 'POST /api/update/start']);
   });
 
   it('refuses a POST to every dashboard route: the dashboard only reads', async () => {
     const r = await rig();
     const dashboard = r.pages.routes.filter((x) => x.page === 'dashboard');
-    expect(dashboard.length).toBe(7);
+    expect(dashboard.length).toBe(8);
     for (const route of dashboard) {
       expect(route.method).toBe('GET');
       const res = await r.post(route.path, {});

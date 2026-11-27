@@ -14,6 +14,9 @@ export const COMMON_JS = `'use strict';
 
   // The only outside links: a chat in Telegram, with or without a start code of six digits.
   const TELEGRAM_LINK = /^https:[/][/]t[.]me[/][A-Za-z0-9_]{5,32}([?]start=[0-9]{6})?$/;
+  // The progress page of an update links back to the dashboard of the new harness, which answers
+  // on another port of this computer, with the access token of its start.
+  const LOCAL_PAGE_LINK = /^http:[/][/]127[.]0[.]0[.]1:[0-9]{1,5}[/](dashboard|setup)([?]token=[A-Za-z0-9_-]{1,200})?$/;
 
   /** Builds one element. props.text sets textContent, props.on adds listeners, props.attrs sets aria-, data-, role and inputmode attributes. */
   function el(tag, props, children) {
@@ -30,6 +33,9 @@ export const COMMON_JS = `'use strict';
         const href = String(v);
         if (href.charAt(0) === '/' || href.charAt(0) === '#') {
           node.setAttribute('href', href);
+        } else if (LOCAL_PAGE_LINK.test(href)) {
+          node.setAttribute('href', href);
+          node.setAttribute('rel', 'noreferrer');
         } else if (TELEGRAM_LINK.test(href)) {
           node.setAttribute('href', href);
           node.setAttribute('target', '_blank');

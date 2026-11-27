@@ -1,5 +1,6 @@
 /**
- * The browser code of the dashboard (chapter 6). It only reads: it calls GET routes only.
+ * The browser code of the dashboard (chapter 6). It only reads: it calls GET routes only, except
+ * the two buttons of the Version part, which check for a release and start an update.
  * Every text from the harness, such as a mission name, a run input or an error, is set with
  * `textContent` through `MA.el`. The text below is JavaScript, not TypeScript, and has no backtick.
  */
@@ -26,6 +27,7 @@ export const DASHBOARD_JS = `'use strict';
   MA.replace(app, [
     statusLine,
     section('harness', 'The harness'),
+    section('version', 'Version'),
     section('approvals', 'Approvals that wait'),
     section('missions', 'Missions'),
     el('section', { className: 'card', id: 'part-runs' }, [el('h2', { text: 'Runs' }), runControls, (parts.runs = el('div', { className: 'section-body' }))]),
@@ -104,6 +106,75 @@ export const DASHBOARD_JS = `'use strict';
       })));
     }
     MA.replace(parts.harness, items);
+  }
+
+  // ------------------------------------------------------------ version
+
+  // While a button works, its part shows what it does, and the refresh leaves the part alone.
+  let versionWork = null;
+  let versionError = null;
+  let versionData = null;
+
+  async function checkRelease() {
+    versionWork = 'Checking for a newer release.';
+    versionError = null;
+    renderVersion(versionData);
+    const r = await MA.api('POST', '/api/update/check', {});
+    versionWork = null;
+    if (!r.ok) versionError = MA.errorText(r);
+    const again = await MA.api('GET', '/api/dashboard/version');
+    if (again.ok && again.data) renderVersion(again.data);
+    else renderVersion(versionData);
+  }
+
+  async function installRelease(version) {
+    if (typeof window.confirm === 'function' && !window.confirm('Install version ' + version + '? The harness stops during the update, and starts again with the new version.')) return;
+    versionWork = 'Starting the update. The progress page opens in a moment.';
+    versionError = null;
+    renderVersion(versionData);
+    const r = await MA.api('POST', '/api/update/start', { version: version });
+    if (r.ok && r.data && typeof r.data.url === 'string') {
+      stopped = true;
+      window.location.assign(r.data.url);
+      return;
+    }
+    versionWork = null;
+    versionError = MA.errorText(r);
+    renderVersion(versionData);
+  }
+
+  function renderVersion(d) {
+    if (!d) return;
+    versionData = d;
+    const items = [];
+    items.push(el('p', null, [
+      'Installed: ', el('strong', { text: d.installed || 'unknown' }), '. ',
+      d.latest ? 'Newest release: ' + d.latest + ', checked at ' + MA.time(d.checkedAt) + '.' : 'No check for a newer release got an answer yet.',
+    ]));
+    if (d.newer) {
+      items.push(el('div', { className: 'banner warn' }, [
+        el('strong', { text: 'Version ' + d.latest + ' is available. ' }),
+        d.notes ? el('pre', { text: d.notes }) : el('span', { text: 'Press Check for updates to read its notes.' }),
+      ]));
+    } else if (d.latest) {
+      items.push(el('p', { className: 'muted', text: 'This is the newest release.' }));
+    }
+    const check = el('button', { type: 'button', className: 'secondary', text: 'Check for updates', disabled: versionWork !== null, on: { click: checkRelease } });
+    const buttons = [check];
+    if (d.newer) {
+      buttons.push(el('button', { type: 'button', id: 'install-release', text: 'Install version ' + d.latest, disabled: versionWork !== null || !!d.refusal, on: { click: function () { installRelease(d.latest); } } }));
+    }
+    items.push(el('div', { className: 'row' }, buttons));
+    if (versionWork) items.push(el('div', { className: 'wait' }, el('div', { className: 'wait-title' }, [el('span', { className: 'spinner', attrs: { 'aria-hidden': 'true' } }), versionWork])));
+    if (versionError) items.push(el('p', { className: 'error', text: versionError }));
+    if (d.newer && d.refusal) items.push(el('p', { className: 'error', text: 'The dashboard cannot install it: ' + d.refusal }));
+    items.push(el('p', { className: 'muted small' }, ['The same in a terminal: ', el('code', { text: d.command })]));
+    MA.replace(parts.version, items);
+  }
+
+  function renderVersionFromRefresh(d) {
+    if (versionWork === null) renderVersion(d);
+    else versionData = d;
   }
 
   // ------------------------------------------------------------ missions
@@ -246,6 +317,7 @@ export const DASHBOARD_JS = `'use strict';
 
   const sources = [
     ['harness', '/api/dashboard/harness', renderHarness],
+    ['version', '/api/dashboard/version', renderVersionFromRefresh],
     ['missions', '/api/dashboard/missions', renderMissions],
     ['runs', null, renderRuns],
     ['cost', '/api/dashboard/cost', renderCost],

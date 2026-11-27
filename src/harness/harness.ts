@@ -42,7 +42,8 @@ import {
 import { createTerminalSurface, TERMINAL_SURFACE_ID, type TerminalSurface } from '../surfaces/terminal/index.js';
 import { builtinTools, createCodeCatalog, createToolCatalog } from '../tools/index.js';
 import { createTriage } from '../triage/index.js';
-import type { ReleaseCheck } from '../update/index.js';
+import type { ReleaseCheck } from '../update/check.js';
+import { compareVersions, parseVersion } from '../update/version.js';
 import {
   chatTrigger,
   createScheduler,
@@ -210,6 +211,24 @@ export interface Harness {
   missedTimerRuns(): MissedTimerRun[];
   /** Replaces any stored secret value found in a text with the credential's id. */
   redact(text: string): string;
+  /** The release check of the dashboard (chapter 6). */
+  release: {
+    /** Runs the check for a newer release now, and stores what it found and when. */
+    checkNow(): Promise<ReleaseCheck & { checkedAt?: string }>;
+    /** What the last check that got an answer found. */
+    last(): ReleaseInfo;
+  };
+}
+
+/** What the last check for a newer release found (chapter 7.4). */
+export interface ReleaseInfo {
+  /** The version that runs. */
+  installed?: string;
+  latest?: string;
+  checkedAt?: string;
+  newer: boolean;
+  /** The notes of the newer release, when they were read. */
+  notes?: string;
 }
 
 /** Another harness answers on the local server of the same root folder. */
@@ -833,13 +852,46 @@ export function createHarness(options: HarnessOptions): Harness {
       return;
     }
     releaseProblem = undefined;
-    store.setState(STATE_KEYS.releaseCheckedAt, now().toISOString());
+    storeRelease(result);
     if (!result.newer || store.getState(STATE_KEYS.releaseNoticed) === result.latest) return;
     store.setState(STATE_KEYS.releaseNoticed, result.latest);
     await dispatcher.notifyUser(
       `Version ${result.latest} of the harness is available. This agent runs version ${result.current}. ` +
-        `To install it, run in a terminal: mission-agent update --root ${shellQuote(paths.root)}`,
+        `To install it, open the dashboard and press Install, or run in a terminal: mission-agent update --root ${shellQuote(paths.root)}`,
     );
+  }
+
+  /** Stores what a check that got an answer found, and when. */
+  function storeRelease(result: Extract<ReleaseCheck, { ok: true }>): string {
+    const at = now().toISOString();
+    store.setState(STATE_KEYS.releaseCheckedAt, at);
+    store.setState(STATE_KEYS.releaseLatest, result.latest);
+    if (result.newer && result.notes !== undefined) store.setState(STATE_KEYS.releaseNotes, result.notes);
+    else if (!result.newer) store.deleteState(STATE_KEYS.releaseNotes);
+    return at;
+  }
+
+  async function checkReleaseNow(): Promise<ReleaseCheck & { checkedAt?: string }> {
+    const check = options.releaseCheck;
+    if (check === undefined) return { ok: false, reason: 'This harness does not look for releases.' };
+    const result = await check();
+    if (!result.ok) return result;
+    return { ...result, checkedAt: storeRelease(result) };
+  }
+
+  function releaseInfo(): ReleaseInfo {
+    const info: ReleaseInfo = { newer: false };
+    if (version !== undefined) info.installed = version;
+    const latest = store.getState(STATE_KEYS.releaseLatest);
+    const checkedAt = store.getState(STATE_KEYS.releaseCheckedAt);
+    const notes = store.getState(STATE_KEYS.releaseNotes);
+    if (latest !== undefined) info.latest = latest;
+    if (checkedAt !== undefined) info.checkedAt = checkedAt;
+    const a = latest === undefined ? undefined : parseVersion(latest);
+    const b = version === undefined ? undefined : parseVersion(version);
+    info.newer = a !== undefined && b !== undefined && compareVersions(a, b) > 0;
+    if (info.newer && notes !== undefined) info.notes = notes;
+    return info;
   }
 
   function lookForReleaseSafely(): void {
@@ -1184,5 +1236,6 @@ export function createHarness(options: HarnessOptions): Harness {
     catalogs: { tools: toolCatalog, triggers: triggerCatalog },
     missedTimerRuns: () => [...missed],
     redact: (text) => redactor.redact(text),
+    release: { checkNow: checkReleaseNow, last: releaseInfo },
   };
 }

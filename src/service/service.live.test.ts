@@ -1,14 +1,17 @@
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { pathsFor } from '../paths.js';
 import { isServerAlive, readServerFile } from '../server/index.js';
-import { installService, serviceStatus, uninstallService, type ServiceOptions } from './service.js';
+import { xmlEscape } from './plist.js';
+import { bootoutAndWait, installService, serviceStatus, uninstallService, type ServiceOptions } from './service.js';
 
-// Uses the real launchctl and the real ~/Library/LaunchAgents. Runs only with MISSION_AGENT_LIVE=1,
-// after "npm run build". macOS shows a notice that a background item was added.
+// Uses the real launchctl, and the real ~/Library/LaunchAgents unless MISSION_AGENT_LAUNCH_AGENTS
+// names another folder. Runs only with MISSION_AGENT_LIVE=1, after "npm run build". macOS shows a
+// notice that a background item was added.
 const live = process.env.MISSION_AGENT_LIVE === '1';
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist', 'cli.js');
 
@@ -81,5 +84,88 @@ describe.skipIf(!live)('the service, with the real launchctl', () => {
     expect(existsSync(before.plistPath)).toBe(false);
     expect((await serviceStatus(options)).loaded).toBe(false);
     expect(await harnessPid()).toBeUndefined();
+  });
+});
+
+/**
+ * The Install button of the dashboard starts the maintenance program from the harness, and the
+ * update then stops the service of that harness. launchd ends every process of a service at its
+ * bootout, except one in its own session. This checks that the program that the button starts,
+ * through spawnDetached, outlives the bootout. It uses a scratch label and a plist in a temporary
+ * folder, never a file in ~/Library/LaunchAgents.
+ */
+describe.skipIf(!live)('a detached child of a service, with the real launchctl', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mission-agent-detached-live-')));
+  const label = `local.mission-agent-scratch.detached-${process.pid}`;
+  const uid = process.getuid?.() ?? 0;
+  const pidsFile = join(dir, 'pids.json');
+  const routes = join(dirname(cliPath), 'pages', 'update-routes.js');
+  let pids: { parent: number; detached: number; attached: number } | undefined;
+
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  afterAll(async () => {
+    await bootoutAndWait({}, { domain: `gui/${uid}`, label }, 'the scratch service').catch(() => undefined);
+    for (const pid of [pids?.detached, pids?.attached, pids?.parent]) if (pid !== undefined && alive(pid)) process.kill(pid, 'SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps the program that spawnDetached started running after the bootout of the service', async () => {
+    expect(existsSync(routes), 'run "npm run build" first').toBe(true);
+    const script = join(dir, 'service.mjs');
+    const sleep = "setTimeout(() => {}, 120000)";
+    writeFileSync(
+      script,
+      [
+        "import { spawn } from 'node:child_process';",
+        "import { writeFileSync } from 'node:fs';",
+        `import { spawnDetached } from ${JSON.stringify(routes)};`,
+        `const d = spawnDetached(process.execPath, ['-e', ${JSON.stringify(sleep)}], ${JSON.stringify(join(dir, 'child.log'))}, ${JSON.stringify(dir)});`,
+        `const a = spawn(process.execPath, ['-e', ${JSON.stringify(sleep)}], { stdio: 'ignore' });`,
+        `writeFileSync(${JSON.stringify(pidsFile)}, JSON.stringify({ parent: process.pid, detached: d.pid, attached: a.pid }));`,
+        'setInterval(() => {}, 1000);',
+        '',
+      ].join('\n'),
+    );
+    const plist = join(dir, `${label}.plist`);
+    writeFileSync(
+      plist,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>${label}</string>
+<key>ProgramArguments</key><array><string>${xmlEscape(process.execPath)}</string><string>${xmlEscape(script)}</string></array>
+<key>RunAtLoad</key><true/>
+<key>StandardErrorPath</key><string>${xmlEscape(join(dir, 'service.err'))}</string>
+</dict></plist>
+`,
+    );
+    execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plist]);
+    // In on-demand-only mode RunAtLoad is held back, so the service is started by hand too.
+    execFileSync('launchctl', ['kickstart', `gui/${uid}/${label}`]);
+    const deadline = Date.now() + 30_000;
+    while (!existsSync(pidsFile)) {
+      if (Date.now() > deadline) throw new Error(`The service did not start. ${existsSync(join(dir, 'service.err')) ? readFileSync(join(dir, 'service.err'), 'utf8') : ''}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    pids = JSON.parse(readFileSync(pidsFile, 'utf8')) as { parent: number; detached: number; attached: number };
+    expect(alive(pids.detached) && alive(pids.attached)).toBe(true);
+
+    await bootoutAndWait({}, { domain: `gui/${uid}`, label }, 'the scratch service');
+    const gone = Date.now() + 15_000;
+    while (alive(pids.parent) || alive(pids.attached)) {
+      if (Date.now() > gone) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(alive(pids.parent), 'the service process ended').toBe(false);
+    expect(alive(pids.attached), 'a child in the session of the service ended with it').toBe(false);
+    expect(alive(pids.detached), 'the detached child still runs').toBe(true);
   });
 });

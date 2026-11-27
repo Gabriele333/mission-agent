@@ -16,6 +16,8 @@ export interface PlistInput {
   stderrPath: string;
   /** The PATH the harness and its runs use. Nothing secret goes here. */
   envPath: string;
+  /** Other variables of the harness, such as the test variables of chapter 7.2. Nothing secret goes here. */
+  environment?: Record<string, string>;
 }
 
 /** Seconds that launchd waits for the harness to stop before it kills it. The default of launchd is 5. */
@@ -75,6 +77,7 @@ export function buildPlist(input: PlistInput): string {
     '  <dict>',
     '    <key>PATH</key>',
     `    ${str(input.envPath)}`,
+    ...Object.entries(input.environment ?? {}).flatMap(([name, value]) => [`    <key>${xmlEscape(name)}</key>`, `    ${str(value)}`]),
     '  </dict>',
     // Starts the harness when the user logs in, and when the service is loaded.
     '  <key>RunAtLoad</key>',

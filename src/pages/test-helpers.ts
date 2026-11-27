@@ -10,7 +10,8 @@ import { readServerFile } from '../server/index.js';
 import type { LaunchctlResult } from '../service/index.js';
 import { fakeTelegram, type FakeTelegram } from '../surfaces/telegram/test-helpers.js';
 import type { SecretStore } from '../types.js';
-import { attachPages, type AttachedPages } from './index.js';
+import type { ReleaseCheck } from '../update/index.js';
+import { attachPages, type AttachedPages, type UpdateRoutesOptions } from './index.js';
 
 /** A real harness with the pages, in a temporary root, with fakes for the SDK, the secrets, Telegram and launchctl. */
 export interface PagesRig {
@@ -54,6 +55,10 @@ export interface RigOptions {
   /** The sign-in program the harness finds. Null: none is found. Default: a fake path. */
   signInProgram?: string | null;
   signInTimeoutMs?: number;
+  /** The release check of the harness. Default: none. */
+  releaseCheck?: () => Promise<ReleaseCheck>;
+  /** The options of the Version part. Default: a development copy. */
+  update?: UpdateRoutesOptions;
 }
 
 export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
@@ -78,6 +83,7 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
     configDebounceMs: 50,
     createTelegramSurface: () => surface,
     telegramFetch: telegram.fetchFn,
+    ...(options.releaseCheck !== undefined ? { releaseCheck: options.releaseCheck } : {}),
     signIn: {
       spawn: signIn.spawn,
       program: () => program ?? undefined,
@@ -122,6 +128,7 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
       run: async (program) => rig.commandAnswers[program.split('/').pop() as string] ?? { code: 127, stdout: '', stderr: 'not found' },
     },
     openUrl: async (url) => void rig.opened.push(url),
+    update: options.update ?? { programDir: tmp, home: null },
     service: {
       cliPath,
       uid: 501,
@@ -267,7 +274,7 @@ export interface PageRun {
 }
 
 /** Runs common.js and one page script in a fresh context, with fetch going to the rig's harness. */
-export async function runPageScript(r: PagesRig, scripts: string[]): Promise<PageRun> {
+export async function runPageScript(r: Pick<PagesRig, 'base' | 'token'>, scripts: string[], extra: Record<string, unknown> = {}): Promise<PageRun> {
   const { createContext, Script } = await import('node:vm');
   const tags = new Set<string>();
   const app = new FakeNode('MAIN');
@@ -298,6 +305,8 @@ export async function runPageScript(r: PagesRig, scripts: string[]): Promise<Pag
     fetch: (path: string, init: RequestInit = {}) =>
       fetch(`${r.base}${path}`, { ...init, headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${r.token}` } }),
     URL,
+    location: { assign: () => undefined, href: '' },
+    ...extra,
   };
   ctx.window = ctx;
   createContext(ctx);

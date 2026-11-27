@@ -1,6 +1,6 @@
 # Install
 
-One script installs the program, the `mission-agent` command and the service.
+One script installs the program, the maintenance program, the `mission-agent` command and the service.
 
 ## What you need
 
@@ -30,23 +30,44 @@ The second way works only while the repository is public. Read a script before y
 
 ## What the script does
 
+The script checks what the program needs. The maintenance program of a release does the rest. It is installed in `~/.mission-agent/maintenance`, outside the program, so it still runs when the program is broken. It also does the uninstall, the [update](update.md) and the [repair](update.md#repair).
+
 1. It checks for macOS, git, Node.js 24 and npm. Without Node.js, it stops and shows two ways to install it: the installer from nodejs.org, or Homebrew.
-2. It gets the newest release with git and builds it in `~/.mission-agent/app`.
-3. It writes the command `~/.mission-agent/bin/mission-agent`. It links the command into a folder of your PATH when it can write to one. Otherwise it shows the line to add to `~/.zshrc`.
+2. It gets the newest release with git and builds it in `~/.mission-agent/app.installing`. It tests the build, then moves it to `~/.mission-agent/app`.
+3. It copies the maintenance program to `~/.mission-agent/maintenance`, and writes the command `~/.mission-agent/bin/mission-agent`. It links the command into a folder of your PATH when it can write to one. Otherwise it shows the line to add to `~/.zshrc`.
 4. It asks for the agent's root folder. See the next section.
 5. It asks whether to install the service. See [Start at login](#start-at-login).
 6. It opens the setup page in the browser. Continue with [Configure](configure.md). The last step of the page checks the settings of the computer. See [Check the computer](#check-the-computer).
 7. Over SSH, with `--no-open`, or when nobody can be asked, it opens no browser. Over SSH, a browser would open on the screen of the computer, not on yours. The script then checks the settings of the computer in the terminal, and prints the command that opens the setup page.
 
-Run it with `--help` to see its options. With `--yes` it asks nothing: it uses `~/mission-agent` and installs the service.
+Run it with `--help` to see its options. With `--yes` it asks nothing: it uses `~/mission-agent` and installs the service. With `--version v0.2.0`, it installs that release instead of the newest.
 
-When you run the script again, it finds the program it installed before. It asks whether to continue the setup with that program, to remove it and install it again from scratch, or to uninstall it (see [Remove it](#remove-it)). From scratch replaces only the program in `~/.mission-agent/app`. It never touches the root folder. With nobody to ask, or with `--yes`, it continues. With `--reinstall`, it starts from scratch without asking. It does not remove a program that a service runs: remove the service first, or get a newer release with `mission-agent update`.
+When the maintenance program is already installed and works, the script runs it, and it continues from there. When it is missing or broken, or with `--reinstall`, the script builds a new release and runs the maintenance program of that release. This is the last fallback: run the script again when nothing else works. It never runs installed code that does not pass its test.
+
+What git and npm printed is in `~/.mission-agent/maintenance.log`.
+
+When you run the script again, it finds the program it installed before. It asks whether to continue the setup with that program, to remove it and install it again from scratch, to uninstall it, or to uninstall it and delete the agent's data too (see [Remove it](#remove-it)). From scratch replaces only the program in `~/.mission-agent/app`. It never touches the root folder. With nobody to ask, or with `--yes`, it continues. With `--reinstall`, it starts from scratch without asking. It does not remove a program that a service runs: remove the service first, or get a newer release with `mission-agent update`.
 
 ## The agent's folder
 
 The program and your agent's data are in two places. The data is in one folder that you choose, called the root folder. It holds the configuration, the missions, their memory and the database.
 
 Every command takes it as `--root`. Without `--root`, a command uses `~/mission-agent`. The `service` and `update` commands always need `--root`. The examples use `~/agents/ada`.
+
+## The installed files
+
+Everything of the program is in `~/.mission-agent`:
+
+| Path | What it is |
+| --- | --- |
+| `app/` | The program: one release, built. |
+| `app.previous/` | The release before the last update. |
+| `maintenance/` | The maintenance program, without packages. |
+| `bin/mission-agent` | The command. It sends `install`, `uninstall`, `update` and `repair` to the maintenance program, and every other command to the program. |
+| `install.json` | The repository, the version and the date of the install. |
+| `maintenance.log` | What git, npm and the maintenance program printed. |
+
+While an update or a repair runs, `maintenance.lock` and `maintenance.json` are there too. They are removed at the end.
 
 ## Start at login
 
@@ -113,13 +134,13 @@ The install script removes the program:
 
 Without a copy of the repository, run `curl -fsSL https://raw.githubusercontent.com/Gabriele333/mission-agent/main/install.sh | bash -s -- --uninstall`.
 
-It shows what it removes, and asks once. It removes the services of the program, the program in `~/.mission-agent`, the command, and the link to the command. It keeps the root folder and the secrets in the Keychain. With `--yes`, it does not ask.
+It shows what it removes, and asks once. It removes the services of the program, the program, the maintenance program and the other files in `~/.mission-agent`, the command, and the link to the command. It keeps the root folder and the secrets in the Keychain. With `--yes`, it does not ask. `mission-agent uninstall` does the same.
 
 To delete the agent's data too, add `--wipe-data`. The script then also deletes these root folders: the ones that the services run, the one given with `--root`, and `~/mission-agent`. It deletes a folder only when it holds a `missions` folder and a `state` folder. It also deletes every secret of the agent in the Keychain. It asks twice. The second time, you type the word `delete`. `--yes` does not cover this. It cannot be undone, and the copies in `backups/` are deleted too.
 
 A sign-in with a Claude plan belongs to Claude Code. The script does not remove it.
 
-When the script cannot run, remove it by hand:
+When no maintenance program can run or be built, the script prints the commands that remove the services and `~/.mission-agent`, with the paths of your computer. You can also remove it by hand:
 
 1. Remove the service: `mission-agent service uninstall --root ~/agents/ada`.
 2. Delete each secret: `mission-agent secret list --root ~/agents/ada`, then `mission-agent secret delete <id>` for each one.
@@ -137,4 +158,6 @@ npm install
 npm run build
 ```
 
-The program is then `node dist/cli.js` in that folder. Use a test root folder with it, never the root folder of a real agent. The `update` command refuses a development copy: update it with git.
+The program is then `node dist/cli.js` in that folder. Use a test root folder with it, never the root folder of a real agent. The `update`, `repair` and `uninstall` commands refuse a development copy: update it with git.
+
+To try the install without touching a real agent, set these four variables: `MISSION_AGENT_REPO` (the repository to install from), `MISSION_AGENT_HOME` (instead of `~/.mission-agent`), `MISSION_AGENT_LAUNCH_AGENTS` (instead of `~/Library/LaunchAgents`) and `MISSION_AGENT_KEYCHAIN_SERVICE` (instead of `mission-agent`). The service file keeps the last two, so the harness that it starts uses them too.

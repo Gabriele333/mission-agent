@@ -7,6 +7,7 @@ export {
   type Harness,
   type HarnessOptions,
   type HarnessStatus,
+  type ReleaseInfo,
   type MissedTimerRun,
 } from './harness.js';
 export { createDispatcher, type Dispatcher, type DispatcherDeps } from './dispatcher.js';

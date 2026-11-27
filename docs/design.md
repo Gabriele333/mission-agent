@@ -62,8 +62,9 @@ This document specifies the harness of a mission-driven personal agent.
   - [7.2 Installation](#72-installation)
   - [7.3 Data format](#73-data-format)
   - [7.4 Update](#74-update)
-  - [7.5 A user's own tools and triggers](#75-a-users-own-tools-and-triggers)
-  - [7.6 Mission library](#76-mission-library)
+  - [7.5 The maintenance program and repair](#75-the-maintenance-program-and-repair)
+  - [7.6 A user's own tools and triggers](#76-a-users-own-tools-and-triggers)
+  - [7.7 Mission library](#77-mission-library)
 - [8 Future developments](#8-future-developments)
 
 ## 1 The struggles of a long-lived agent
@@ -508,7 +509,7 @@ Gates match on the action id (§D.3). Two tools can declare the same action id, 
 | Mission registry                      | `tool:mission_registry` | The mission admin only                           | Every change (§D.3)                               |
 | Promotion staging                     | `tool:promotion_stage`  | The general mission and the self-improve mission | What it stages waits in the approval queue (§I.3) |
 
-Every other tool, such as `tool:gmail` in the example of §A.4, is added by a developer. A tool that comes with a release is part of the program. A user's own tool is in the `tools/` folder of the agent's root (chapter 7.5).
+Every other tool, such as `tool:gmail` in the example of §A.4, is added by a developer. A tool that comes with a release is part of the program. A user's own tool is in the `tools/` folder of the agent's root (chapter 7.6).
 
 **Credentials.** A credential is a secret value that the harness, a tool or a trigger needs, such as a key or a token. This part assumes macOS. Every credential has an id of the form `credential:<owner>.<name>` (§A.4). The harness has two of its own: the model credential when the model login is `api_key`, and `credential:telegram.bot_token` when Telegram is used (§F.1). A declaration names the credentials that a tool or a trigger needs, never their values. Each credential allows as little as its tool needs, and the user can revoke it.
 
@@ -602,7 +603,7 @@ A trigger has two functions, start and stop. When it sees an event, it gives the
 - One line in plain words that says what happened.
 - A small data part, such as a message id.
 
-Each trigger has its own folder inside the harness, with its code and a declaration. The declaration states which parameters a subscription can set, for example the time of a timer, and the names of the credentials the trigger needs (§A.5). A trigger never calls the model. A user's own trigger is in the `triggers/` folder of the agent's root (chapter 7.5).
+Each trigger has its own folder inside the harness, with its code and a declaration. The declaration states which parameters a subscription can set, for example the time of a timer, and the names of the credentials the trigger needs (§A.5). A trigger never calls the model. A user's own trigger is in the `triggers/` folder of the agent's root (chapter 7.6).
 
 Two triggers come with the harness. `trigger:cron` fires on a schedule. `trigger:chat` fires when a chat message is assigned to the mission, by its Telegram thread (§F.1) or by triage (§B.3). A mission that does not list `trigger:chat` never receives chat messages.
 
@@ -763,8 +764,8 @@ state/                 ← written by the harness only; no run can read here
   agent.db             ← the database: logbook, signal records and harness state (§E.2.2)
   claude/              ← the SDK's configuration folder, which holds the sessions (§3.3)
   server               ← the port and the token of the local connection, written at each start (§J.3)
-tools/                 ← the user's own tools, one folder per tool; no run can read here (chapter 7.5)
-triggers/              ← the user's own triggers, one folder per trigger; no run can read here (chapter 7.5)
+tools/                 ← the user's own tools, one folder per tool; no run can read here (chapter 7.6)
+triggers/              ← the user's own triggers, one folder per trigger; no run can read here (chapter 7.6)
 ```
 
 The working directory of a run is the active mission's own folder. A run reads its own folder and `core/`, and writes only to the `memory/` and `data/` subfolders of its own folder. The hook refuses any write to `manifest.yaml` (§E.2.1).
@@ -967,14 +968,15 @@ The setup page writes the agent configuration file (§A.1) and the credentials i
 
 #### J.2 Dashboard
 
-The dashboard shows the state of the agent. It only reads and changes nothing. It is specified in [chapter 6](#6-dashboard).
+The dashboard shows the state of the agent. It changes nothing in the agent. Its only two buttons check for a newer release and start an update, which the maintenance program then does (chapter 7.5). It is specified in [chapter 6](#6-dashboard).
 
 #### J.3 Rules
 
 - The harness listens on one port, for connections from the local machine only. The two pages and the terminal chat (§F.1) use that connection. Every request must carry a secret token that the harness creates at each start.
 - The harness writes the port and the token to one file, `state/server`, that only the user's account can read. The commands read them there.
 - Neither page shows the value of a credential. A value goes straight to the Keychain (§A.5).
-- The dashboard only reads. It changes no file, no setting and no mission.
+- The dashboard changes no file, no setting and no mission. Its two buttons for releases are page routes behind the token, like those of the setup page. No tool of the agent can reach a page route.
+- The progress page of an update is served by the maintenance program, not by the harness, because the update stops the harness (chapter 7.5). It follows the same rules: 127.0.0.1 only, its own token, the same checks of the request, and the same strict policy for the content of the page.
 - The harness program has three commands that connect to the harness. `setup` and `dashboard` open their page in the browser, with the token. `chat` opens the terminal chat (§F.1).
 - The `secret` commands write to the Keychain directly (§A.5), so they work when the harness is stopped.
 - The agent's root folder is `~/mission-agent` by default. Every command accepts another path. The service that starts the harness records the path (§H).
@@ -1092,7 +1094,7 @@ The mission admin can edit the manifest of every mission except the three system
 Missions are managed through the mission admin. Create, edit and freeze are described in §A.4 (Lifecycle).
 
 - A mission can be created.
-- A mission can be added from the mission library ([chapter 7.6](#76-mission-library)).
+- A mission can be added from the mission library ([chapter 7.7](#77-mission-library)).
 - A mission can be edited.
 - A mission can be frozen.
 - A mission can be deleted.
@@ -1241,9 +1243,10 @@ Nothing else is entered again. A session resumed after the folder was renamed on
 
 The dashboard is a local web page served by the harness (§J). The user monitors the agent there. The `dashboard` command of the harness program opens it in the browser. It reads the mission folders (§E.2.3), the logbook database, which also holds the harness state (§E.2.2), and the tools and triggers in the harness (§A.5, §B.2).
 
-The dashboard shows eight things:
+The dashboard shows nine things:
 
 - The harness: the agent name, whether it is running or paused, when it started, and which timer runs it missed while it was stopped (§B.2).
+- The version: the installed version, the newest release that the last check found, the time of that check, and the notes of a newer release. It has two buttons. "Check for updates" runs the release check now (chapter 7.4). "Install version X" starts the update (chapter 7.5). It also shows the command that does the same in a terminal.
 - The missions: for each one, its name, description, status and version, its last run with the outcome, and its next timer run.
 - The runs: for each one, the mission, the time, the input, the tools called, the tokens, the cost and the outcome. Failed runs are marked (§H).
 - The cost: the total per mission and per period, computed from the logbook.
@@ -1252,7 +1255,7 @@ The dashboard shows eight things:
 - The self-improve pass: the date of the last pass and the proposal list waiting for approval (§I.3).
 - The tools and the triggers: each id, the missions that use it, and whether its credentials are present.
 
-The dashboard only reads. It changes nothing. The user answers an approval in the chat (§G), freezes a mission through the mission admin ([Mission admin](#42-mission-admin)) and pauses the agent with a command (§B.1). The configuration is changed in the setup page ([chapter 5](#5-setup-page)).
+The dashboard changes nothing in the agent. The Install button starts the maintenance program, which does the update and shows its progress on a page of its own (chapter 7.5). The button is refused in the cases where the update refuses (chapter 7.4), and the page says why. The user answers an approval in the chat (§G), freezes a mission through the mission admin ([Mission admin](#42-mission-admin)) and pauses the agent with a command (§B.1). The configuration is changed in the setup page ([chapter 5](#5-setup-page)).
 
 ---
 
@@ -1265,20 +1268,49 @@ The program and the agent's data are in two places. The program is the installed
 - A release is a version number in the program and a git tag with the same number, such as `v0.2.0`. Users install releases only, never the development branch.
 - Each release has notes. They say what changed and whether the data format changed. The notes are the message of the release's tag, so the `update` command can show them without another service.
 - Each release names one exact version of the Claude Agent SDK, because the harness depends on tested SDK behaviour (§3.3).
-- Before a release, the unit tests and the tests with the real model must pass.
+- Before a release, the unit tests, the real install test, the live test of the service and the tests with the real model must pass. `npm test` runs the unit tests and the real install test, which takes about a minute. `npm run test:install` runs the real install test alone. `npm run test:service` runs the live test of the service, and `npm run test:live` the tests with the real model. The rule for the critical parts is in chapter 7.5.
 
 ### 7.2 Installation
 
-The user installs one release with one script, `install.sh`, which is in the repository. There are two ways to run it, and both run the same script: from a copy of the repository, or with one command that downloads it. The script does six things:
+The user installs one release with one script, `install.sh`, which is in the repository. There are two ways to run it, and both run the same script: from a copy of the repository, or with one command that downloads it.
 
-1. It gets the newest release from the repository with git, and builds it, in one program folder. The path of that folder is the same for every version.
-2. It writes the `mission-agent` command.
+The script is short. It checks what the program needs: macOS, git, Node.js 24 or later and npm. It offers to install Node.js with Homebrew when Homebrew is present. The rest is done by the maintenance program of a release (chapter 7.5), in one of two ways:
+
+- When the maintenance program is installed and its self-test passes, the script runs it with `install` and the options. This is the usual way.
+- Otherwise, and with `--reinstall`, the script gets the newest release with git, builds it in `app.installing`, and runs the maintenance program of that build with `install --staged`. This is the last fallback. It also repairs an install whose maintenance program is broken, because no installed code runs.
+
+`--uninstall` and `--wipe-data` also go to the maintenance program. When none can run or be built, the script prints how to remove the program by hand. Under `curl | bash`, standard input is the script, so the maintenance program gets the terminal as its standard input and can ask questions.
+
+The install then does six things:
+
+1. It puts the release in the program folder. The path of that folder is the same for every version.
+2. It copies the maintenance program next to it, and writes the `mission-agent` command.
 3. It asks for the agent's root folder. The harness never chooses the root folder of a service: the `service` commands need the path (§H).
-4. It says what the service is and asks before it installs it (§H). This is where the user allows the agent to start at login and after a crash. The service belongs to the user's account, so it needs no password.
-5. It leaves the checks of the computer's settings (§H) to the setup page, which shows them in the last step of the first setup (chapter 5.1). Over SSH or with `--no-open`, the script runs them in the terminal instead. It then asks whether the computer runs with nobody at it. For each setting that is not in order, it says what to change, offers to open System Settings there, and checks again after the change. The user can skip a setting.
+4. It says what the service is and asks before it installs it (§H). This is where the user allows the agent to start at login and after a crash. The service belongs to the user's account, so it needs no password. The program installs its own service, once its tests pass.
+5. It leaves the checks of the computer's settings (§H) to the setup page, which shows them in the last step of the first setup (chapter 5.1). Over SSH or with `--no-open`, the install runs them in the terminal instead. For each setting that is not in order, it says what to change, offers to open System Settings there, and checks again after the change. The user can skip a setting.
 6. It opens the setup page ([chapter 5](#5-setup-page)). Over SSH or with `--no-open`, it prints the command that opens the page instead. Over SSH, a browser would open on the screen of the computer, not on the user's screen, and the page answers only on that computer.
 
+When the install finds a past install, it offers four answers: continue the setup with that program, remove it and install it again from scratch, uninstall it, or uninstall it and delete the agent's data too. With nobody to ask, it continues. It never removes a program that a service runs.
+
+The installation is one home folder, `~/.mission-agent`:
+
+```
+app/                   ← the program: one release, built
+app.installing/        ← a release while it is built and tested; removed when it fails
+app.previous/          ← the release before the last update
+maintenance/           ← the maintenance program: package.json and dist/ of the release, no node_modules/
+bin/mission-agent      ← the command
+install.json           ← the repository, the version and the date of the install
+maintenance.json       ← the journal of an update in progress (chapter 7.5)
+maintenance.lock       ← the lock of a run of the maintenance program
+maintenance.log        ← what git, npm and the maintenance program printed
+```
+
+The command is a short shell script. It sends `install`, `uninstall`, `update` and `repair` to the maintenance program, and every other command to the program. When the program is missing, it says to run `mission-agent repair`. When Node.js is missing, it says how to get it.
+
 The script installs with git and not with a package manager. The release check and the update then read the same repository and the same tags (chapter 7.4).
+
+Four variables change where the install reads and writes, so that a test never touches a real agent: `MISSION_AGENT_REPO`, `MISSION_AGENT_HOME`, `MISSION_AGENT_LAUNCH_AGENTS` and `MISSION_AGENT_KEYCHAIN_SERVICE`. The program and the service file keep the last two, so a harness that a test starts uses them too.
 
 A developer of the harness installs a release in the same way, apart from the development copy. A development run uses a test root folder, never the root folder of a real agent.
 
@@ -1290,24 +1322,70 @@ A developer of the harness installs a release in the same way, apart from the de
 
 ### 7.4 Update
 
-The `update` command of the harness program updates the installed program. It needs the agent's root folder, because it copies that folder and restarts its harness. It does these steps in order:
+The `update` command updates the installed program. The maintenance program does it (chapter 7.5). It needs the agent's root folder, because it copies that folder and restarts its harness. The new release is built and tested before the agent is stopped, so most failures leave the agent running. It does these steps in order:
 
-1. It looks for a newer release, and shows its version and its notes.
-2. It asks the user to confirm.
-3. It stops the harness.
-4. It copies the agent's root folder to `backups/update/<old version>-<date>/`, without the `backups/` folder itself. It keeps the last 2 copies (placeholder).
-5. It installs the new release.
-6. It starts the harness, which migrates the data when the format number is higher (chapter 7.3).
-7. It checks that the harness answers and reports the new version.
-8. If a step from 5 to 7 fails, it installs the old release again, puts the copy back, starts the harness and tells the user. It puts the copy back only when the harness of the new release was started, because nothing else can have changed the root folder.
+1. It takes the lock, and finishes or undoes an update that stopped half way.
+2. It refuses in the cases below.
+3. It finds the newest release, or the one given with `--version`, which must be newer. It shows its version and its notes, and asks the user to confirm, unless `--yes`.
+4. It gets the release into `app.installing` with git, runs `npm ci` and builds it. It checks that the new program reports the expected version and passes its self-test. If a step fails, it removes `app.installing` and stops. The agent was never stopped.
+5. It stops the service, and waits until the harness has gone.
+6. It copies the agent's root folder to `backups/update/<old version>-<date>/`, without the `backups/` folder itself. It keeps the last 2 copies (placeholder).
+7. It swaps the folders: it removes `app.previous`, renames `app` to `app.previous`, and renames `app.installing` to `app`.
+8. It starts the service with the command of the new program. The harness migrates the data when the format number is higher (chapter 7.3). The update waits until the harness answers, and checks that it reports the new version. Without a service, only the checks of step 4 apply.
+9. It replaces the maintenance program and the command, writes `install.json`, removes old copies, and removes the journal.
 
-The command refuses in three cases, before it changes anything. The program folder is not an installed release, such as a development copy. A harness for the root folder runs in a terminal and not as the service. Another agent on the machine runs the same program as a service.
+If step 7 or 8 fails, it goes back. It stops the new harness and renames the folders back. It puts the copy of the root folder back only when the new harness had started, because nothing else can have changed the root folder. It then starts the service and checks that the old version answers. If going back fails too, the journal records that a repair is needed, and the update names `mission-agent repair` (chapter 7.5).
 
-The harness never updates itself. An update is new code with access to the user's credentials and tools, so a person starts it. Once a day the harness looks for a newer release, and tells the user in the chat when one exists. It names each release once, with the command that installs it. The check asks the repository that the program was installed from for the names of its tags, with git. It sends nothing about the user.
+The command refuses in four cases, before it changes anything. The program folder is not an installed release, such as a development copy. A harness for the root folder runs in a terminal and not as the service. Another agent on the machine runs the same program as a service. The installed program fails its own tests: a repair comes first.
+
+The harness never updates itself. An update is new code with access to the user's credentials and tools, so a person starts it: in a terminal, or with the Install button of the dashboard (chapter 6). Once a day the harness looks for a newer release, and tells the user in the chat when one exists. It names each release once, with the two ways to install it. The check asks the repository that the program was installed from for the names of its tags, with git. For the notes of a newer release, it fetches that one tag. It sends nothing about the user.
 
 The service file names a path of the program that is the same for every version, so it stays valid after an update (§H).
 
-### 7.5 A user's own tools and triggers
+### 7.5 The maintenance program and repair
+
+The maintenance program installs, uninstalls, updates and repairs the program. It is part of each release, in `src/maintenance/`, and the normal build makes it. The install copies it to `maintenance/` in the home folder, outside the program folder, so it runs when the program is broken.
+
+**What it may use.** Everything that `src/maintenance/main.ts` reaches imports only the builtins of Node.js and files of the repository. It loads every module at its start, with no `import()`. So it needs no `node_modules/`, and a broken or missing package cannot stop it. A unit test walks its imports and fails on any other import.
+
+**The commands.** The `mission-agent` command sends four commands to it (chapter 7.2):
+
+- `install`, which the install script runs (chapter 7.2).
+- `uninstall`, which removes the program, the maintenance program, `app.previous`, the files of the home folder, the link to the command and the services of the program. It keeps the agent's data. With `--wipe-data`, it also deletes the root folders and the secrets in the Keychain. It asks twice, the second time for the word `delete`, and needs a person to answer. `--yes` never covers it.
+- `update` (chapter 7.4).
+- `repair`, below.
+
+When the program runs `update`, `repair` or `uninstall` itself, it sends them to the maintenance program with the terminal. A development copy refuses them.
+
+**The lock and the journal.** One run of the maintenance program works at a time. It holds `maintenance.lock`, with its process id. A lock whose process is gone is taken over. The update writes its journal, `maintenance.json`, before each stage: the stage, the old and the new version, the root folder, its process id and the start time. The file is written to a temporary name and then renamed, so it is never half written. When a run is killed, the next update or repair reads the journal and goes on:
+
+- Before the swap, it removes `app.installing` and makes sure that the service runs.
+- After the swap, it finishes the update when the new program passes its tests and its harness answers with the new version. Otherwise it goes back.
+
+**Repair.** `mission-agent repair` looks, says what it found, and fixes with the user's consent, or without a question with `--yes`. It checks in this order:
+
+1. Node.js 24 or later, git and npm. It cannot fix these, so it says how.
+2. An update that stopped half way. It finishes or undoes it.
+3. A leftover `app.installing`. It uses it when `app` is broken and it passes the tests. Otherwise it removes it.
+4. The program. When it fails its tests, repair offers `app.previous` when that passes, which needs no network. Otherwise it builds the version in `install.json`, or the newest release, in `app.installing`, tests it and swaps it in. The broken folder is removed only after the new one passes.
+5. The command and its link.
+6. That the maintenance program has the version of the program.
+7. Each service of the program. It installs it again when it is not loaded or its harness does not answer.
+8. The data. Repair never puts a copy of the root folder back by itself. When a harness still does not start, it asks each time about the newest copy in `backups/update/`. `--yes` does not cover this question.
+
+It ends with one line that says whether everything is in order, or what is still wrong.
+
+**The Install button.** The button of the dashboard (chapter 6) starts the maintenance program as a separate process, in its own session, so that it outlives the stop of the service. It runs `update --yes --version <the version shown> --serve`, and its output goes to `maintenance.log`. With `--serve`, the maintenance program serves a progress page (§J.3). The page shows the steps, what the program printed and the result. On success it links to the dashboard of the new harness. On a failure it says what failed and whether the old version runs again. When a repair is needed, it shows a Repair button. That repair answers yes to every question except the one about the data, which the page asks with its own confirmation. The page stops a few minutes after the end.
+
+**Self-heal.** An agent installed before the maintenance program existed has neither the maintenance program nor the new command. At each start of the harness, and before it sends a command to the maintenance program, the program writes both when they are missing or of another version. It does this only when it runs from `<home>/app`, and not while a run of the maintenance program holds the lock. The update of an older release therefore installs them at the first start of the new harness.
+
+**The critical parts.** The install, the update and the repair are among the most critical parts of the project. A fault there leaves the user with an agent that does not start, and with no way to fix it from inside the agent. So they must never leave the agent broken, and they must always be tested. Three rules apply to them:
+
+- They are always tested. A release is made only when the unit tests, the real install test and the live test of the service pass (chapter 7.1).
+- The unit tests fail each step of the update in turn, and stop the process at each step as a kill would. After each one, the agent must run the old or the new version, and a repair must find everything in order. Every new step of the update needs a row in these tables.
+- The real install test runs the real `install.sh`, the real maintenance program, git and npm against a repository that it makes with `git init`. It installs, installs again with each answer, updates to a good release and to broken ones, kills an update, repairs a deleted program, replaces a broken maintenance program and uninstalls.
+
+### 7.6 A user's own tools and triggers
 
 An update replaces every file of the program, so code that a user adds cannot be there. It is in two folders of the agent's root (§E.2.3): `tools/` for the user's own tools, and `triggers/` for the user's own triggers. Six rules apply:
 
@@ -1318,7 +1396,7 @@ An update replaces every file of the program, so code that a user adds cannot be
 - No run can read or write these folders (§E.2.1). The mission admin writes no code, so it cannot add one ([Mission admin](#42-mission-admin)).
 - The folders hold no secret value. A declaration names the credentials, and the values are in the Keychain (§A.5).
 
-### 7.6 Mission library
+### 7.7 Mission library
 
 The mission library is a folder of the repository, `mission-library/`, with one folder per published mission. Anyone can publish a mission there with a pull request. It is not part of the agent: the missions of one agent are in the `missions/` folder of its root, system missions included (§E.2.3).
 

@@ -20,6 +20,10 @@ export const STATE_KEYS = {
   releaseCheckedAt: 'release.checked_at',
   /** The newest release that the user was told about, such as `0.2.0`. */
   releaseNoticed: 'release.noticed',
+  /** The newest release that the last check found, such as `0.2.0`. */
+  releaseLatest: 'release.latest',
+  /** The notes of that release, when it is newer than the program that runs. */
+  releaseNotes: 'release.notes',
 } as const;
 
 /** Keys that belong to one mission and are removed when it is deleted. */

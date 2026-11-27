@@ -25,7 +25,8 @@ Any way around a rule that the design states. For example:
 - A request for approval shows something other than what then runs.
 - The value of a credential appears in a prompt, a memory note, the logbook, a log file, a web page or a chat message.
 - The local web pages or the local connection answer without the access token, or answer another computer.
-- The install script or the `update` command runs code that is not from the release it names.
+- The install script, the maintenance program or the `update` command runs code that is not from the release it names. This covers the Install button of the dashboard, which starts the maintenance program.
+- The Install button, or the progress page of an update, can be used without the access token, or from a tool of the agent.
 - A mission added from the mission library does more than its manifest shows.
 - Text that comes from outside, such as a web page or a message, makes the harness itself skip one of these rules.
 

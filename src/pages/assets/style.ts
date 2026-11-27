@@ -320,6 +320,9 @@ li.stage:last-child { padding-bottom: 0; }
   font-weight: 650;
 }
 li.stage.open .stage-mark { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+li.stage.failed .stage-mark { border-color: var(--bad); color: var(--bad); }
+li.stage.skipped h3.stage-title { color: var(--muted); font-weight: 500; }
+pre.log { max-height: 360px; overflow-y: auto; }
 li.stage.done .stage-mark { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .stage-body { min-width: 0; }
 .stage-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s1) var(--s3); min-height: 28px; }

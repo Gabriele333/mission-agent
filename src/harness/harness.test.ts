@@ -435,7 +435,7 @@ describe('the check for a newer release (chapter 7.4)', () => {
     const notice = textsOf(stream).find((t) => t.includes('is available'));
     expect(notice).toBe(
       'Version 0.2.0 of the harness is available. This agent runs version 0.1.0. ' +
-        `To install it, run in a terminal: mission-agent update --root ${root}`,
+        `To install it, open the dashboard and press Install, or run in a terminal: mission-agent update --root ${root}`,
     );
     expect(h.store.getState(STATE_KEYS.releaseNoticed)).toBe('0.2.0');
 

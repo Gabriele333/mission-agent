@@ -43,6 +43,28 @@ export const execLaunchctl: LaunchctlRunner = (args) =>
 /** The PATH given to the service when the installing process has none. */
 const FALLBACK_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
+/**
+ * The variables that replace the folders and names of a real install, so that a test install
+ * touches none of them (chapter 7.2). The service file records the ones that are set, so the
+ * harness that launchd starts uses the same ones.
+ */
+export const TEST_VARIABLES = ['MISSION_AGENT_LAUNCH_AGENTS', 'MISSION_AGENT_KEYCHAIN_SERVICE'] as const;
+
+/** `MISSION_AGENT_LAUNCH_AGENTS`, else `~/Library/LaunchAgents`. */
+export function defaultLaunchAgentsDir(env: NodeJS.ProcessEnv = process.env): string {
+  const given = env.MISSION_AGENT_LAUNCH_AGENTS;
+  return given !== undefined && given !== '' ? resolve(given) : join(homedir(), 'Library', 'LaunchAgents');
+}
+
+function testEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of TEST_VARIABLES) {
+    const value = env[name];
+    if (value !== undefined && value !== '') out[name] = value;
+  }
+  return out;
+}
+
 export interface ServiceOptions {
   /** The agent's root folder, as the user gave it. It is made absolute. */
   root: string;
@@ -54,8 +76,10 @@ export interface ServiceOptions {
   envPath?: string;
   /** Default: the user id of this process. */
   uid?: number;
-  /** Default: `~/Library/LaunchAgents`. */
+  /** Default: `MISSION_AGENT_LAUNCH_AGENTS`, else `~/Library/LaunchAgents`. */
   launchAgentsDir?: string;
+  /** Variables besides PATH that the service file sets. Default: the test variables that are set. */
+  environment?: Record<string, string>;
   launchctl?: LaunchctlRunner;
   /** How long to wait for launchd to remove a service after `bootout`. Default 40 seconds. */
   removalWaitMs?: number;
@@ -165,7 +189,7 @@ function uidOf(options: ServiceOptions): number {
   return uid;
 }
 
-function runnerOf(options: ServiceOptions): LaunchctlRunner {
+function runnerOf(options: Pick<ServiceOptions, 'launchctl'>): LaunchctlRunner {
   if (options.launchctl !== undefined) return options.launchctl;
   if (process.platform !== 'darwin') throw new ServiceError('The service works on macOS only.');
   return execLaunchctl;
@@ -176,7 +200,7 @@ export function servicePlan(options: ServiceOptions): ServicePlan {
   const root = resolve(options.root);
   const uid = uidOf(options);
   const label = serviceLabel(root);
-  const dir = options.launchAgentsDir ?? join(homedir(), 'Library', 'LaunchAgents');
+  const dir = options.launchAgentsDir ?? defaultLaunchAgentsDir();
   const logs = serviceLogPaths(root);
   const cliPath = resolve(options.cliPath ?? builtCliPath());
   const envPath = options.envPath ?? process.env.PATH ?? FALLBACK_PATH;
@@ -189,6 +213,7 @@ export function servicePlan(options: ServiceOptions): ServicePlan {
     stdoutPath: logs.stdout,
     stderrPath: logs.stderr,
     envPath: envPath === '' ? FALLBACK_PATH : envPath,
+    environment: options.environment ?? testEnvironment(),
   });
   return {
     root,
@@ -232,7 +257,7 @@ export async function serviceStatus(options: ServiceOptions): Promise<ServiceSta
   const root = resolve(options.root);
   const uid = uidOf(options);
   const label = serviceLabel(root);
-  const dir = options.launchAgentsDir ?? join(homedir(), 'Library', 'LaunchAgents');
+  const dir = options.launchAgentsDir ?? defaultLaunchAgentsDir();
   const plistPath = join(dir, `${label}.plist`);
   const run = runnerOf(options);
   const status: ServiceStatus = { label, plistPath, installed: existsSync(plistPath), loaded: false };
@@ -306,8 +331,9 @@ function xmlUnescape(value: string): string {
 /**
  * Removes a loaded service with `launchctl bootout`, and waits until launchd no longer knows it.
  * `bootout` returns while the harness still stops, and a `bootstrap` in that time fails.
+ * The maintenance program uses it to stop a service whose program is broken (chapter 7.5).
  */
-async function bootoutAndWait(options: ServiceOptions, plan: Pick<ServicePlan, 'domain' | 'label'>, what: string): Promise<void> {
+export async function bootoutAndWait(options: Pick<ServiceOptions, 'launchctl' | 'removalWaitMs'>, plan: Pick<ServicePlan, 'domain' | 'label'>, what: string): Promise<void> {
   const run = runnerOf(options);
   const target = `${plan.domain}/${plan.label}`;
   const out = await run(['bootout', target]);

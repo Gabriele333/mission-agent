@@ -482,68 +482,75 @@ describe('library', () => {
   });
 });
 
-describe('update', () => {
-  it('needs the root folder, and takes no argument', async () => {
-    const noRoot = await run(['update']);
-    expect(noRoot.code).toBe(2);
-    expect(noRoot.err).toBe("update needs the agent's root folder: mission-agent update --root <path>\n");
-    expect((await run(['update', 'now', '--root', root])).code).toBe(2);
-    expect((await run(['status', '--yes', '--root', root])).err).toContain('The option --yes is not used by the status command.');
+describe('the commands of the maintenance program', () => {
+  /** An installed program: `<home>/app` with its version and a built maintenance program. */
+  function installedProgram(version = '0.2.0'): { home: string; dir: string } {
+    const home = join(tmp, 'home', '.mission-agent');
+    const dir = join(home, 'app');
+    mkdirSync(join(dir, 'dist', 'maintenance'), { recursive: true });
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'mission-agent', version }));
+    writeFileSync(join(dir, 'dist', 'maintenance', 'main.js'), '// the maintenance program\n');
+    mkdirSync(join(home, 'bin'), { recursive: true });
+    writeFileSync(join(home, 'bin', 'mission-agent'), '#!/bin/sh\nexec node app/dist/cli.js "$@"\n');
+    return { home, dir };
+  }
+
+  it('refuses update, repair and uninstall in a development copy', async () => {
+    for (const command of ['update', 'repair', 'uninstall']) {
+      const r = await run([command, '--root', root], { home: null });
+      expect(r.code, command).toBe(1);
+      expect(r.err).toContain('is a development copy, not an installed program');
+    }
   });
 
-  it('refuses a program folder that was not installed with git, with a plain message', async () => {
-    const dir = join(tmp, 'app');
-    mkdirSync(dir);
-    const r = await run(['update', '--yes', '--root', root], { programDir: dir });
-    expect(r.code).toBe(1);
-    expect(r.err).toContain('was not installed with git');
-    expect(r.err).not.toContain('    at ');
-  });
-
-  it('runs the steps with the service of the root folder, and reports the new version', async () => {
-    const dir = join(tmp, 'app');
-    mkdirSync(join(dir, '.git'), { recursive: true });
-    mkdirSync(join(dir, 'dist'));
-    writeFileSync(join(dir, 'dist', 'cli.js'), '');
-    await run(['init', '--name', 'Ada', '--root', root]);
-    let head = 'v0.1.0';
-    const ran: string[] = [];
-    const r = await run(['update', '--root', root], {
+  it('forwards them with every option, after it writes the maintenance program and the command file', async () => {
+    const { home, dir } = installedProgram();
+    const calls: { main: string; args: string[] }[] = [];
+    const r = await run(['update', '--root', root, '--yes', '--version', 'v0.3.0'], {
       programDir: dir,
-      input: 'yes\n',
-      serviceOptions: {
-        cliPath: join(dir, 'dist', 'cli.js'),
-        nodePath: process.execPath,
-        uid: 501,
-        launchAgentsDir: join(tmp, 'LaunchAgents'),
-        findHarness: async () => undefined,
-        launchctl: async (args) => (args[0] === 'print' ? { code: 113, stdout: '', stderr: 'not found' } : { code: 0, stdout: '', stderr: '' }),
-      },
-      runCommand: async (program, args) => {
-        ran.push(`${program === process.execPath ? 'node' : program} ${args.join(' ')}`);
-        const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' });
-        if (args[0] === 'describe') return ok(`${head}\n`);
-        if (args[0] === 'rev-parse') return ok('abc\n');
-        if (args[0] === 'tag' && args[2] === 'v*') return ok('v0.1.0\nv0.2.0\n');
-        if (args[0] === 'tag') return ok('The first update.\n');
-        if (args.includes('checkout')) head = args[args.length - 1] as string;
-        if (args[1] === 'build') {
-          mkdirSync(join(dir, 'dist'), { recursive: true });
-          writeFileSync(join(dir, 'dist', 'cli.js'), '');
-        }
-        if (args[1] === '--version') return ok('0.2.0\n');
-        return ok();
+      runMaintenance: async (main, args) => {
+        calls.push({ main, args });
+        return 3;
       },
     });
-    expect(r.err).toBe('Install version 0.2.0? [y/N] ');
+    expect(r.code).toBe(3);
+    expect(calls).toEqual([
+      { main: join(home, 'maintenance', 'dist', 'maintenance', 'main.js'), args: ['--home', home, 'update', '--root', root, '--yes', '--version', 'v0.3.0'] },
+    ]);
+    // The old command file sent everything to the program. The new one sends these commands to the maintenance program.
+    expect(readFileSync(join(home, 'bin', 'mission-agent'), 'utf8')).toContain('maintenance/dist/maintenance/main.js');
+    expect(JSON.parse(readFileSync(join(home, 'maintenance', 'package.json'), 'utf8')).version).toBe('0.2.0');
+    expect(JSON.parse(readFileSync(join(home, 'install.json'), 'utf8')).version).toBe('0.2.0');
+    expect(r.err).toContain('Wrote the maintenance program of version 0.2.0');
+
+    const again = await run(['repair', '--yes'], { programDir: dir, runMaintenance: async (_m, args) => (calls.push({ main: '', args }), 0) });
+    expect(again.code).toBe(0);
+    expect(again.err).toBe('');
+    expect(calls[1]?.args).toEqual(['--home', home, 'repair', '--yes']);
+  });
+
+  it('writes the maintenance program again at each start, when it is of another version', async () => {
+    const { home, dir } = installedProgram('0.2.0');
+    await run(['init', '--name', 'Ada', '--root', root]);
+    mkdirSync(join(home, 'maintenance'), { recursive: true });
+    writeFileSync(join(home, 'maintenance', 'package.json'), JSON.stringify({ version: '0.1.3' }));
+    let stop: (signal: string) => void = () => {};
+    const signal = new Promise<string>((r) => (stop = r));
+    const started = run(['start', '--root', root], { programDir: dir, waitForSignal: () => signal });
+    await waitUntil(() => existsSync(join(home, 'maintenance', 'dist', 'maintenance', 'main.js')));
+    stop('SIGTERM');
+    expect((await started).code).toBe(0);
+    expect(JSON.parse(readFileSync(join(home, 'maintenance', 'package.json'), 'utf8')).version).toBe('0.2.0');
+  });
+});
+
+describe('self-test', () => {
+  it('opens a database in memory, finds the program of the SDK, and takes no argument', async () => {
+    const r = await run(['self-test']);
+    expect(r.err).toBe('');
     expect(r.code).toBe(0);
-    expect(r.out).toContain('  The first update.');
-    expect(r.out).toContain('Version 0.2.0 is installed.');
-    expect(ran).toContain('git -c advice.detachedHead=false checkout --detach v0.2.0');
-    expect(ran).toContain(`node ${join(dir, 'dist', 'cli.js')} --version`);
-    const copies = readdirSync(join(root, 'backups', 'update'));
-    expect(copies).toHaveLength(1);
-    expect(existsSync(join(root, 'backups', 'update', copies[0] as string, 'agent.yaml'))).toBe(true);
+    expect(r.out).toMatch(/^The self-test passed: version \d+\.\d+\.\d+, Node\.js \d+/);
+    expect((await run(['self-test', 'now'])).code).toBe(2);
   });
 });
 

@@ -1,9 +1,10 @@
 /**
- * The two pages. They hold no data and no inline script or style: the script files build the
+ * The pages. They hold no data and no inline script or style: the script files build the
  * content from the JSON routes, with `textContent` and `createElement` only (§J.3).
+ * The progress page is served by the maintenance program, so this module uses no package.
  */
 
-function page(title: string, script: string, otherLink: { href: string; text: string }): string {
+function page(title: string, script: string, otherLink?: { href: string; text: string }): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -18,7 +19,7 @@ function page(title: string, script: string, otherLink: { href: string; text: st
 <body>
 <header class="top">
 <h1 id="page-title">${title}</h1>
-<nav><a href="${otherLink.href}">${otherLink.text}</a></nav>
+${otherLink === undefined ? '' : `<nav><a href="${otherLink.href}">${otherLink.text}</a></nav>`}
 </header>
 <main id="app">
 <p class="muted">Loading.</p>
@@ -31,3 +32,5 @@ function page(title: string, script: string, otherLink: { href: string; text: st
 
 export const SETUP_HTML = page('Setup', 'setup.js', { href: '/dashboard', text: 'Dashboard' });
 export const DASHBOARD_HTML = page('Dashboard', 'dashboard.js', { href: '/setup', text: 'Setup' });
+/** The page of the maintenance program that shows an update or a repair as it runs (chapter 7.5). */
+export const PROGRESS_HTML = page('Update', 'progress.js');

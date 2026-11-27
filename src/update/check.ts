@@ -10,13 +10,18 @@ import { compareVersions, formatVersion, newestReleaseTag, parseVersion, tagsOfL
  */
 
 export type ReleaseCheck =
-  | { ok: true; current: string; latest: string; newer: boolean }
+  | { ok: true; current: string; latest: string; newer: boolean; notes?: string }
   | { ok: false; reason: string };
 
 export interface ReleaseCheckOptions {
   /** Default: the folder of the program that runs. */
   programDir?: string;
   run?: CommandRunner;
+  /**
+   * Also read the notes of a newer release: its tag is fetched into the program's own `.git`, and
+   * its message read. Nothing else of the program folder changes.
+   */
+  notes?: boolean;
 }
 
 export async function checkForRelease(options: ReleaseCheckOptions = {}): Promise<ReleaseCheck> {
@@ -33,10 +38,14 @@ export async function checkForRelease(options: ReleaseCheckOptions = {}): Promis
   const tag = newestReleaseTag(tagsOfLsRemote(listed.stdout));
   const latest = tag === undefined ? undefined : parseVersion(tag);
   if (latest === undefined) return { ok: true, current: formatVersion(current), latest: formatVersion(current), newer: false };
-  return {
-    ok: true,
-    current: formatVersion(current),
-    latest: formatVersion(latest),
-    newer: compareVersions(latest, current) > 0,
-  };
+  const newer = compareVersions(latest, current) > 0;
+  const result: ReleaseCheck = { ok: true, current: formatVersion(current), latest: formatVersion(latest), newer };
+  if (newer && options.notes === true && tag !== undefined) {
+    const fetched = await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/tags/${tag}:refs/tags/${tag}`], { cwd: dir, timeoutMs: 60_000 });
+    if (fetched.code === 0) {
+      const read = await run('git', ['for-each-ref', '--format=%(contents)', `refs/tags/${tag}`], { cwd: dir, timeoutMs: 30_000 });
+      if (read.code === 0) result.notes = read.stdout.trim();
+    }
+  }
+  return result;
 }

@@ -18,14 +18,19 @@ import {
 } from './dashboard-data.js';
 import { fail, sendPageFile } from './http.js';
 import { setupRoutes, type PageRoute, type SetupOptions } from './setup-routes.js';
+import { updateRoutes, type UpdateRoutesOptions } from './update-routes.js';
+import { homeOfProgram } from '../maintenance/layout.js';
+import { programDir } from '../program.js';
 
 /**
  * The two local pages of the harness (§J): the setup page and the dashboard. Every route is added
- * to the harness's local server, so every request goes through its token check (§J.3).
+ * to the harness's local server, so every request goes through its token check (§J.3). The
+ * dashboard only reads, except the two buttons of its Version part (chapter 6).
  */
 
 export { PAGE_CSP } from './http.js';
 export { type PageRoute } from './setup-routes.js';
+export { spawnDetached, type UpdateRoutesOptions } from './update-routes.js';
 
 export const SETUP_PATH = '/setup';
 export const DASHBOARD_PATH = '/dashboard';
@@ -39,13 +44,15 @@ export interface PagesOptions {
   system?: SetupOptions['system'];
   /** Opens a place in System Settings. Default: the macOS `open` command. */
   openUrl?: SetupOptions['openUrl'];
+  /** The Version part of the dashboard. Default: the program that runs, and its home folder when it is installed. */
+  update?: UpdateRoutesOptions;
   now?: () => Date;
   log?: (text: string) => void;
 }
 
 export interface AttachedPages {
   /** Every route the pages added, with its method. */
-  routes: { method: 'GET' | 'POST'; path: string; page: 'setup' | 'dashboard' | 'file' }[];
+  routes: { method: 'GET' | 'POST'; path: string; page: 'setup' | 'dashboard' | 'update' | 'file' }[];
 }
 
 function fileRoutes(): PageRoute[] {
@@ -107,10 +114,14 @@ export function attachPages(harness: Harness, options: PagesOptions = {}): Attac
   if (options.system !== undefined) setupOptions.system = options.system;
   if (options.openUrl !== undefined) setupOptions.openUrl = options.openUrl;
 
+  const dir = programDir();
+  const update = updateRoutes(harness, options.update ?? { programDir: dir, home: homeOfProgram(dir) ?? null }, options.service ?? {});
   const groups: [AttachedPages['routes'][number]['page'], PageRoute[]][] = [
     ['file', fileRoutes()],
     ['setup', setupRoutes(harness, setupOptions)],
-    ['dashboard', dashboardRoutes(src)],
+    // The Version part only reads. Its two buttons are the routes of the update group.
+    ['dashboard', [...dashboardRoutes(src), ...update.filter((r) => r.method === 'GET')]],
+    ['update', update.filter((r) => r.method === 'POST')],
   ];
   const routes: AttachedPages['routes'] = [];
   for (const [page, list] of groups) {
