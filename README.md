@@ -8,7 +8,7 @@ The design is in [docs/design.md](docs/design.md).
 
 ## Status
 
-This is the first release, 0.1.0. It has not been used as a daily agent yet.
+This is an early version. It has not been used as a daily agent yet.
 
 Built and tested:
 
