@@ -2,3 +2,9 @@ node_modules/
 dist/
 .DS_Store
 *.log
+
+# Private notes never go into the repository. They are kept outside it.
+# This catches one that is copied here by mistake: a name that holds the
+# marker [PRIVATE], or a folder named "private documents".
+*\[PRIVATE\]*
+private documents/

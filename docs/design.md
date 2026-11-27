@@ -1,4 +1,4 @@
-# Designing a Mission-Sliced Personal Agent
+# Mission agent: design
 
 This document specifies the harness of a mission-driven personal agent.
 
