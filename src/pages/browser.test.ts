@@ -64,15 +64,15 @@ describe('the setup page script', () => {
     expect(page.byId('check-sleep').textContent).not.toContain('sudo pmset');
   });
 
-  it('goes through the five steps of the first setup', async () => {
+  it('goes through the six steps of the first setup', async () => {
     const r = await rig({ account: { apiKeySource: 'ANTHROPIC_API_KEY' } as AccountInfo });
     const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
-    await page.waitForText('Step 1 of 5: The agent name');
+    await page.waitForText('Step 1 of 6: The agent name');
     expect(page.text()).toContain('The agent is paused.');
 
     page.byId('f-agent-name').value = 'Ada';
     await page.byId('f-agent-name').parent?.parent?.fire('submit');
-    await page.waitForText('Step 2 of 5: The model login');
+    await page.waitForText('Step 2 of 6: The model login');
     expect(r.harness.config()?.config.agentName).toBe('Ada');
 
     const key = page.byId('secret-credential-model-api-key');
@@ -85,19 +85,45 @@ describe('the setup page script', () => {
     expect(page.text()).toContain('The agent is running.');
 
     await page.button('Continue').fire('click');
-    await page.waitForText('Step 3 of 5: Telegram');
+    await page.waitForText('Step 3 of 6: Telegram');
     await page.button('Skip Telegram').fire('click');
-    await page.waitForText('Step 4 of 5: The limits and the models');
+    await page.waitForText('Step 4 of 6: The limits and the models');
     page.byId('f-run-limits-max-steps').value = '20';
     await page.byId('f-run-limits-max-steps').parent?.parent?.fire('submit');
-    await page.waitForText('Step 5 of 5: The service');
+    await page.waitForText('Step 5 of 6: The service');
     expect(r.harness.config()?.config.runLimits.maxSteps).toBe(20);
     await page.waitForText('What the install writes');
     expect(page.text()).toContain(r.launchAgentsDir);
 
+    // The last step shows the checks of the computer. Sleep is a choice until the user says nobody sits at it.
+    r.commandAnswers.pmset = { code: 0, stdout: 'AC Power:\n sleep                10\n autorestart          1\n', stderr: '' };
+    await page.button('Continue').fire('click');
+    await page.waitForText('Step 6 of 6: The computer');
+    await page.button('Check the computer again').fire('click');
+    await until(() => page.byId('check-sleep').textContent.includes('not set'), 'the sleep check to be not set');
+    expect(page.byId('check-service').textContent).toContain('problem');
+    expect(page.byId('check-sleep').textContent).not.toContain('problem');
+    expect(page.text()).toContain('Still open: Service.');
+
+    const box = page.byId('unattended');
+    expect(box.checked).toBe(false);
+    box.checked = true;
+    await box.fire('change');
+    expect(page.byId('check-sleep').textContent).toContain('problem');
+    expect(page.text()).toContain('Still open: Service, Sleep.');
+
+    // The user changes the setting, and the page reads it again. The choice of the box stays.
+    r.commandAnswers.pmset = { code: 0, stdout: 'AC Power:\n sleep                0\n autorestart          1\n', stderr: '' };
+    await page.button('Check the computer again').fire('click');
+    await until(() => page.byId('check-sleep').textContent.includes('in order'), 'the sleep check to be in order');
+    expect(page.byId('unattended').checked).toBe(true);
+    expect(page.text()).toContain('Still open: Service.');
+
+    // The user can finish with a problem still open.
     await page.button('Finish').fire('click');
     await page.waitForText('The first setup is done.');
-    for (const part of ['Reach the agent', 'Agent', 'Models', 'Limits', 'Telegram', 'Credentials', 'Service']) {
+    expect(page.text()).toContain('This computer needs a change. Not in order: Service.');
+    for (const part of ['Reach the agent', 'Agent', 'Models', 'Limits', 'Telegram', 'Credentials', 'Service', 'Computer']) {
       expect(page.find((n) => n.tagName === 'H2' && n.textContent === part), part).toBeDefined();
     }
     expect(page.text()).toContain('mission-agent chat --root');

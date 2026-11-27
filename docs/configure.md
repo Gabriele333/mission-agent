@@ -12,9 +12,11 @@ The harness must be running. Then:
 mission-agent setup --root ~/agents/ada
 ```
 
-The page opens in the browser. It asks for the agent name, the model login, Telegram (you can skip it), the limits and the service. It saves each answer when you give it. The harness ends its pause when the name and the model login are present.
+The page opens in the browser. It asks for the agent name, the model login, Telegram (you can skip it), the limits and the service. Its last step shows the settings of the computer. It saves each answer when you give it. The harness ends its pause when the name and the model login are present.
 
-After the first setup, the page also has a part named "Computer". It shows whether the settings of macOS that the agent depends on are in order, such as the service, the Keychain, sleep and automatic login. The page reads them again every minute, and it changes none of them. See [Install](install.md), "Check the computer".
+The last step shows whether the settings of macOS that the agent depends on are in order, such as the service, the Keychain, sleep and automatic login. Check the box "This computer runs the agent with nobody at it" if nobody sits at the computer. The settings that such a computer needs then count as problems. You can finish the first setup with a problem still open, because some changes need you to log out first. The page says which problems are still open.
+
+After the first setup, the page shows the same list in its part named "Computer". The page reads the settings again every minute, and it changes none of them. See [Install](install.md), "Check the computer".
 
 ## By hand
 

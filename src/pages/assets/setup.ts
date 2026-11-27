@@ -1,5 +1,5 @@
 /**
- * The browser code of the setup page (chapter 5). The first setup has five steps in order (§5.1).
+ * The browser code of the setup page (chapter 5). The first setup has six steps in order (§5.1).
  * After it, the page shows the five parts of §5.2 and the service. Each answer is saved when the
  * user gives it. A credential value goes in one POST and is never shown again (§J.3).
  * The text below is JavaScript, not TypeScript, and has no backtick.
@@ -11,6 +11,8 @@ export const SETUP_JS = `'use strict';
   let data = null;
   let service = null;
   let system = null;
+  // True when the user says that this computer runs the agent with nobody at it. Kept in the page only.
+  let unattended = false;
   let wizard = null;
   let finished = false;
   let stopped = false;
@@ -466,19 +468,33 @@ export const SETUP_JS = `'use strict';
 
   // ------------------------------------------------------------ the computer (§H)
 
-  // The settings that are not in order, of the kind that every agent needs.
+  // A setting that is not in order counts as a problem when every agent needs it, or when the
+  // user says that this computer runs the agent with nobody at it.
+  function isProblem(c) {
+    return c.state === 'not_ok' && (c.group === 'needed' || unattended);
+  }
+
+  // The settings that are not in order and count as a problem.
   function systemProblems() {
     if (!system || !system.ok) return [];
-    return system.checks.filter(function (c) { return c.group === 'needed' && c.state === 'not_ok'; });
+    return system.checks.filter(isProblem);
   }
 
   function checkBadge(c) {
     if (c.state === 'ok') return el('span', { className: 'badge ok', text: 'in order' });
     if (c.state === 'unknown') return el('span', { className: 'badge', text: 'unknown' });
     // A setting for a computer with nobody at it is a choice on any other computer.
-    return c.group === 'needed'
+    return isProblem(c)
       ? el('span', { className: 'badge bad', text: 'problem' })
       : el('span', { className: 'badge warn', text: 'not set' });
+  }
+
+  function unattendedBox() {
+    const box = el('input', { id: 'unattended', type: 'checkbox', checked: unattended, on: { change: function () {
+      unattended = !!box.checked;
+      render();
+    } } });
+    return el('p', null, [el('label', { htmlFor: 'unattended' }, [box, ' This computer runs the agent with nobody at it'])]);
   }
 
   function checkRow(c) {
@@ -512,7 +528,10 @@ export const SETUP_JS = `'use strict';
         const list = system.checks.filter(function (c) { return c.group === group; });
         if (list.length === 0) return;
         items.push(el('h3', { text: system.groups[group] }));
-        if (group === 'unattended') items.push(el('p', { className: 'help', text: 'These matter for a computer with no screen that must keep the agent running. On a computer that you sit at, they are your choice.' }));
+        if (group === 'unattended') {
+          items.push(el('p', { className: 'help', text: 'These matter for a computer with no screen that must keep the agent running. On a computer that you sit at, they are your choice.' }));
+          items.push(unattendedBox());
+        }
         items.push(el('ul', { className: 'checks' }, list.map(checkRow)));
       });
       items.push(el('p', { className: 'muted small', text: 'Checked at ' + new Date(system.checkedAt).toLocaleTimeString() + '. The page checks again every minute.' }));
@@ -568,13 +587,14 @@ export const SETUP_JS = `'use strict';
 
   // ------------------------------------------------------------ the first setup (§5.1)
 
-  const STEPS = ['The agent name', 'The model login', 'Telegram', 'The limits and the models', 'The service'];
+  const STEPS = ['The agent name', 'The model login', 'Telegram', 'The limits and the models', 'The service', 'The computer'];
 
   function stepDone(i) {
     if (i === 1) return !!data.agentName;
     if (i === 2) return data.login.state === 'ready';
     if (i === 3) return data.telegram.userId !== null;
     if (i === 5) return !!(service && service.ok && service.status && service.status.installed);
+    if (i === 6) return !!(system && system.ok && systemProblems().length === 0);
     return false;
   }
 
@@ -596,7 +616,7 @@ export const SETUP_JS = `'use strict';
 
   function next(text, enabled) {
     return el('button', { type: 'button', text: text, disabled: !enabled, on: { click: function () {
-      if (wizard === 5) {
+      if (wizard === STEPS.length) {
         wizard = null;
         finished = true;
       } else {
@@ -608,7 +628,7 @@ export const SETUP_JS = `'use strict';
 
   function wizardStep() {
     const n = wizard;
-    const head = el('h2', { text: 'Step ' + n + ' of 5: ' + STEPS[n - 1] });
+    const head = el('h2', { text: 'Step ' + n + ' of ' + STEPS.length + ': ' + STEPS[n - 1] });
     if (n === 1) {
       const name = field('agent_name', 'Agent name', 'text', { help: 'Free text, such as Ada. The agent uses it in every message.', emptyIsDefault: false });
       return el('section', { className: 'card' }, [head, configForm([name], 'Save and continue', function () { wizard = 2; }), nav(false, null)]);
@@ -639,10 +659,33 @@ export const SETUP_JS = `'use strict';
         nav(true, null),
       ]);
     }
+    if (n === 5) {
+      return el('div', null, [
+        el('section', { className: 'card' }, [head, el('p', { text: 'Install the harness as a service, so that it starts when you log in. You can also do this later.' })]),
+        servicePart(),
+        nav(true, next('Continue', true)),
+      ]);
+    }
     return el('div', null, [
-      el('section', { className: 'card' }, [head, el('p', { text: 'Install the harness as a service, so that it starts when you log in. You can also do this later.' })]),
-      servicePart(),
+      el('section', { className: 'card' }, [
+        head,
+        el('p', { text: 'Change each setting that is not in order, then press Check the computer again.' }),
+        el('p', { text: 'You can finish with a problem still open. Some changes need you to log out first.' }),
+      ]),
+      systemPart(),
+      computerSummary(),
       nav(true, next('Finish', true)),
+    ]);
+  }
+
+  // What the last step says about the problems that are still open.
+  function computerSummary() {
+    if (!system || !system.ok) return null;
+    const open = systemProblems();
+    if (open.length === 0) return el('p', { className: 'good', text: 'No problem is open.' });
+    return el('div', { className: 'banner warn', attrs: { role: 'status' } }, [
+      el('strong', { text: 'Still open: ' + open.map(function (c) { return c.title; }).join(', ') + '. ' }),
+      'You can finish now and change them later. The Computer part of this page shows them again.',
     ]);
   }
 
@@ -656,7 +699,8 @@ export const SETUP_JS = `'use strict';
       out.push(wizardStep());
     } else {
       if (finished) out.push(el('div', { className: 'banner ok', text: 'The first setup is done. Each part below can be changed at any time.' }));
-      const open = STEPS.map(function (t, i) { return stepDone(i + 1) ? null : t; }).filter(function (t, i) { return t !== null && i !== 3; });
+      // Step 4 has no done state. Step 6 is left out because the banner above already names its problems.
+      const open = STEPS.map(function (t, i) { return stepDone(i + 1) ? null : t; }).filter(function (t, i) { return t !== null && i !== 3 && i !== 5; });
       if (!finished && open.length > 0) {
         out.push(el('section', { className: 'card' }, [
           el('h2', { text: 'First setup' }),

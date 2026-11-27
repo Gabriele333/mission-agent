@@ -35,10 +35,12 @@ The second way works only while the repository is public. Read a script before y
 3. It writes the command `~/.mission-agent/bin/mission-agent`. It links the command into a folder of your PATH when it can write to one. Otherwise it shows the line to add to `~/.zshrc`.
 4. It asks for the agent's root folder. See the next section.
 5. It asks whether to install the service. See [Start at login](#start-at-login).
-6. It checks the settings of the computer. See [Check the computer](#check-the-computer).
-7. It opens the setup page in the browser. Continue with [Configure](configure.md).
+6. It opens the setup page in the browser. Continue with [Configure](configure.md). The last step of the page checks the settings of the computer. See [Check the computer](#check-the-computer).
+7. Over SSH, with `--no-open`, or when nobody can be asked, it opens no browser. Over SSH, a browser would open on the screen of the computer, not on yours. The script then checks the settings of the computer in the terminal, and prints the command that opens the setup page.
 
 Run it with `--help` to see its options. With `--yes` it asks nothing: it uses `~/mission-agent` and installs the service.
+
+When you run the script again, it finds the program it installed before. It asks whether to continue the setup with that program, to remove it and install it again from scratch, or to uninstall it (see [Remove it](#remove-it)). From scratch replaces only the program in `~/.mission-agent/app`. It never touches the root folder. With nobody to ask, or with `--yes`, it continues. With `--reinstall`, it starts from scratch without asking. It does not remove a program that a service runs: remove the service first, or get a newer release with `mission-agent update`.
 
 ## The agent's folder
 
@@ -66,7 +68,7 @@ If `service install` or `service status` says that launchd holds back the start,
 
 ## Check the computer
 
-The agent depends on a few settings of macOS. The install script checks them, and you can check them at any time:
+The agent depends on a few settings of macOS. The setup page checks them in the last step of the first setup. You can check them at any time:
 
 ```
 mission-agent check --root ~/agents/ada
@@ -89,9 +91,9 @@ What a computer needs to run the agent with nobody at it, such as a computer wit
 - The computer does not go to sleep by itself.
 - The computer starts by itself after a power cut. A computer with a battery has no such setting.
 
-On a computer that you sit at, the second list is your choice, and the check shows those settings as "not set". With `--unattended`, they count as problems.
+On a computer that you sit at, the second list is your choice, and the check shows those settings as "not set". With `--unattended`, they count as problems. On the setup page, the box "This computer runs the agent with nobody at it" does the same. The page keeps that choice only while it is open.
 
-With `--guide`, the check goes through each problem with you. It can open System Settings at the right place, and it checks again after your change. The install script runs it this way.
+With `--guide`, the check goes through each problem with you. It can open System Settings at the right place, and it checks again after your change. The install script runs it this way when it opens no browser.
 
 ## Run it without the service
 
@@ -102,6 +104,22 @@ mission-agent start --root ~/agents/ada
 This runs the harness until Ctrl+C. The first time it starts paused, because nothing is configured. Leave it running, and configure it from a second terminal: see [Configure](configure.md).
 
 ## Remove it
+
+The install script removes the program:
+
+```
+./install.sh --uninstall
+```
+
+Without a copy of the repository, run `curl -fsSL https://raw.githubusercontent.com/Gabriele333/mission-agent/main/install.sh | bash -s -- --uninstall`.
+
+It shows what it removes, and asks once. It removes the services of the program, the program in `~/.mission-agent`, the command, and the link to the command. It keeps the root folder and the secrets in the Keychain. With `--yes`, it does not ask.
+
+To delete the agent's data too, add `--wipe-data`. The script then also deletes these root folders: the ones that the services run, the one given with `--root`, and `~/mission-agent`. It deletes a folder only when it holds a `missions` folder and a `state` folder. It also deletes every secret of the agent in the Keychain. It asks twice. The second time, you type the word `delete`. `--yes` does not cover this. It cannot be undone, and the copies in `backups/` are deleted too.
+
+A sign-in with a Claude plan belongs to Claude Code. The script does not remove it.
+
+When the script cannot run, remove it by hand:
 
 1. Remove the service: `mission-agent service uninstall --root ~/agents/ada`.
 2. Delete each secret: `mission-agent secret list --root ~/agents/ada`, then `mission-agent secret delete <id>` for each one.

@@ -1191,13 +1191,14 @@ The setup page is a local web page served by the harness (§J). The user sets up
 
 ### 5.1 First setup
 
-The user installs the harness program and runs its `setup` command. No agent configuration file exists yet, so the harness starts paused (§H) and the page opens. The page asks for five things, in this order:
+The user installs the harness program and runs its `setup` command. No agent configuration file exists yet, so the harness starts paused (§H) and the page opens. The page asks for six things, in this order:
 
 1. The agent name (§A.2). It is required.
 2. The model login (§A.5): an API key, or the user's own Claude plan. The page stores an API key in the Keychain. For a plan, the page shows Anthropic's sign-in command, and the user runs it in a terminal. One of the two is required.
 3. Telegram, which the user can skip. The user creates a bot in Telegram and enters its token, which the page stores in the Keychain. The page then shows a code. The user sends the code to the bot, and the harness records the sender as the user's Telegram account (§F.1). Without Telegram, the default surface is the terminal.
 4. The limits and the models. The page shows the defaults of §A.1, and the user can keep them.
 5. The service. The page installs the harness as a service of the user's account, so that it starts at login (§H). When the install script installed it already (chapter 7.2), the page shows it as installed.
+6. The computer. The page shows the checks of the computer's settings (§H), in both groups. The user says whether the computer runs with nobody at it, and the page then counts the second group as faults. The page keeps this answer only while it is open. The user can finish with a setting still not in order, because some changes need a new login. The page says which settings are still open.
 
 The page saves each answer when the user gives it, so the user can close the page and continue later. The harness stays paused until the agent name is present and the model login is ready. It then ends the pause. If Telegram is set, the harness creates the threads of the three system missions (§F.1). The page then shows the two ways to reach the agent: the terminal and the Telegram bot.
 
@@ -1270,8 +1271,8 @@ The user installs one release with one script, `install.sh`, which is in the rep
 2. It writes the `mission-agent` command.
 3. It asks for the agent's root folder. The harness never chooses the root folder of a service: the `service` commands need the path (§H).
 4. It says what the service is and asks before it installs it (§H). This is where the user allows the agent to start at login and after a crash. The service belongs to the user's account, so it needs no password.
-5. It runs the checks of the computer's settings (§H). It asks whether the computer runs with nobody at it. For each setting that is not in order, it says what to change, offers to open System Settings there, and checks again after the change. The user can skip a setting.
-6. It opens the setup page ([chapter 5](#5-setup-page)).
+5. It leaves the checks of the computer's settings (§H) to the setup page, which shows them in the last step of the first setup (chapter 5.1). Over SSH or with `--no-open`, the script runs them in the terminal instead. It then asks whether the computer runs with nobody at it. For each setting that is not in order, it says what to change, offers to open System Settings there, and checks again after the change. The user can skip a setting.
+6. It opens the setup page ([chapter 5](#5-setup-page)). Over SSH or with `--no-open`, it prints the command that opens the page instead. Over SSH, a browser would open on the screen of the computer, not on the user's screen, and the page answers only on that computer.
 
 The script installs with git and not with a package manager. The release check and the update then read the same repository and the same tags (chapter 7.4).
 
