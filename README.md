@@ -8,7 +8,7 @@ The design is in [docs/design.md](docs/design.md).
 
 ## Status
 
-This is a first version. It is not released, and it has not been used as a daily agent yet.
+This is the first release, 0.1.0. It has not been used as a daily agent yet.
 
 Built and tested:
 
@@ -33,7 +33,6 @@ Not built yet:
 
 - The self-improvement loop of the design (chapter I), signals and the rating buttons.
 - Any tool for an outside system, such as mail or a calendar. A developer adds a tool as code (design, §A.5).
-- A first release. Until a release tag exists, the install script and the `update` command have nothing to install.
 - The data format number, and the `tools/` and `triggers/` folders for a user's own code (design, chapter 7).
 
 ## Documentation

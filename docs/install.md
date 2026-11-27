@@ -1,6 +1,6 @@
 # Install
 
-One script installs the program, the `mission-agent` command and the service. No release exists yet. Until the first one is tagged, the script stops and says so, and you install a development copy (see the end of this page).
+One script installs the program, the `mission-agent` command and the service.
 
 ## What you need
 
