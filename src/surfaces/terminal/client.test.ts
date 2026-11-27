@@ -1,7 +1,7 @@
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { tempPaths, waitFor } from '../../server/test-helpers.js';
-import { ChatClientError, NOT_RUNNING_TEXT, parseLine, runChatClient } from './client.js';
+import { ChatClientError, greeting, NOT_RUNNING_TEXT, parseLine, runChatClient } from './client.js';
 import { approvalRequest, startHarness, type Harness } from './test-helpers.js';
 import type { Paths } from '../../paths.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -86,7 +86,7 @@ describe('runChatClient', () => {
   it('sends lines and commands, and prints each answer with its label on the line before', async () => {
     const h = await harness();
     const chat = startChat(h.paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
     chat.type('hello');
     await chat.waitForText('Got: hello');
     expect(chat.out()).toContain(`${LABEL}\nGot: hello\n`);
@@ -104,7 +104,7 @@ describe('runChatClient', () => {
   it('sends lines in the order they were typed', async () => {
     const h = await harness();
     const chat = startChat(h.paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
     const lines = Array.from({ length: 20 }, (_, i) => `line ${i}`);
     chat.input.write(lines.map((l) => `${l}\n`).join(''));
     await waitFor(() => h.host.incomingCalls.length === 20, 'twenty messages');
@@ -114,7 +114,7 @@ describe('runChatClient', () => {
   it('sends a line typed just before the end of input', async () => {
     const h = await harness();
     const chat = startChat(h.paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
     chat.input.end('last words\n');
     await chat.done;
     expect(h.host.incomingCalls).toEqual([{ surface: 'surface:terminal', text: 'last words' }]);
@@ -130,10 +130,65 @@ describe('runChatClient', () => {
     await chat.waitForText('Mission inbox-curator was frozen.');
   });
 
+  it('greets with the name of the agent and its state when it runs', async () => {
+    const h = await harness();
+    const chat = startChat(h.paths);
+    await chat.waitForText('Connected to Ada.');
+    expect(chat.out()).toBe('Connected to Ada. It is running. Type a message and press Enter. Ctrl+C ends the chat.\n\n');
+  });
+
+  it('greets with the reason of the pause and how to end it', async () => {
+    const h = await harness();
+    Object.assign(h.state, { paused: true, pauseReason: 'The model login is not ready.', resumeHint: 'After you fix this, send /resume.' });
+    const chat = startChat(h.paths);
+    await chat.waitForText('Connected to Ada.');
+    expect(chat.out()).toBe(
+      'Connected to Ada. It is paused: The model login is not ready.\n' +
+        'After you fix this, send /resume.\n' +
+        'Type a message and press Enter. Ctrl+C ends the chat.\n\n',
+    );
+  });
+
+  it('says that the agent is not set up, with the setup command', async () => {
+    const h = await harness();
+    Object.assign(h.state, { agentName: 'mission-agent', setUp: false, paused: true, pauseReason: 'agent.yaml does not exist.', resumeHint: 'After you fix this, send /resume.' });
+    const chat = startChat(h.paths);
+    await chat.waitForText('Connected to mission-agent.');
+    expect(chat.out()).toBe(
+      'Connected to mission-agent. The agent is not set up yet, so it does not answer messages.\n' +
+        `Set it up with: mission-agent setup --root ${h.paths.root}\n` +
+        'Ctrl+C ends the chat.\n\n',
+    );
+  });
+
+  it('replays no pause notice that is over, and prints no heading when nothing is left', async () => {
+    const h = await harness();
+    await h.surface.send({ missionId: null, label: 'mission-agent', text: 'The harness started paused. agent.yaml does not exist.', status: true });
+    await h.surface.send({ missionId: null, label: 'Ada', text: 'The agent is no longer paused. Runs start again.', status: true });
+    const chat = startChat(h.paths);
+    await chat.waitForText('Connected to Ada. It is running.');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(chat.out()).not.toContain('Messages sent while no chat was open');
+    expect(chat.out()).not.toContain('paused');
+  });
+
+  it('still replays an answer of a mission sent while the agent paused and resumed', async () => {
+    const h = await harness();
+    h.surface.notice('The agent is paused because the model login is not ready.', 'Ada', { status: true });
+    await h.surface.send({ missionId: 'm_k7q3zp2xw9ha', label: LABEL, text: 'Sent at night.' });
+    await h.surface.send({ missionId: null, label: 'Ada', text: 'The agent is no longer paused. Runs start again.', status: true });
+    const chat = startChat(h.paths);
+    await chat.waitForText('Sent at night.');
+    expect(chat.out()).toBe(
+      'Connected to Ada. It is running. Type a message and press Enter. Ctrl+C ends the chat.\n\n' +
+        `Messages sent while no chat was open:\n\n${LABEL}\nSent at night.\n\n`,
+    );
+  });
+
   it('sends approve and reject as chat text when no request waits', async () => {
     const h = await harness();
     const chat = startChat(h.paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
     chat.type('approve');
     chat.type('reject this idea');
     await chat.waitForText('Got: reject this idea');
@@ -144,7 +199,7 @@ describe('runChatClient', () => {
   it('answers one waiting request with approve, a, reject and r, with and without a reason', async () => {
     const h = await harness();
     const chat = startChat(h.paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
 
     const cases: Array<[string, unknown, string]> = [
       ['approve', { kind: 'approved' }, 'approved'],
@@ -172,7 +227,7 @@ describe('runChatClient', () => {
   it('uses short numbers when several requests wait', async () => {
     const h = await harness();
     const chat = startChat(h.paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
     for (const id of ['apr_a', 'apr_b', 'apr_c']) {
       h.host.waitingIds.add(id);
       await h.surface.showApproval(approvalRequest(id), LABEL);
@@ -207,7 +262,7 @@ describe('runChatClient', () => {
   it('never gives a number to a new request while another request waits', async () => {
     const h = await harness();
     const chat = startChat(h.paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
     for (const id of ['apr_a', 'apr_b']) {
       h.host.waitingIds.add(id);
       await h.surface.showApproval(approvalRequest(id), LABEL);
@@ -240,7 +295,7 @@ describe('runChatClient', () => {
   it('says so when the request no longer waits', async () => {
     const h = await harness();
     const chat = startChat(h.paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
     // Not in waitingIds: the host answers false, as for a request that just timed out.
     await h.surface.showApproval(approvalRequest('apr_gone'), LABEL);
     await chat.waitForText('Approval request 1 ·');
@@ -263,7 +318,7 @@ describe('runChatClient', () => {
     cleanups.push(() => paths.remove());
     const first = await harness(paths);
     const chat = startChat(paths);
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
 
     await first.stop();
     await chat.waitForText('The connection to the harness was lost. Trying to connect again.');
@@ -276,7 +331,7 @@ describe('runChatClient', () => {
     expect(second.port).not.toBe(first.port);
     second.host.waitingIds.add('apr_new');
     await second.surface.showApproval(approvalRequest('apr_new'), LABEL);
-    await chat.waitForText('Connected to the harness again.');
+    await chat.waitForText('Connected to Ada again. It is running.');
     await chat.waitForText(`Approval request 1 · ${LABEL}`);
     chat.type('hello again');
     await chat.waitForText('Got: hello again');
@@ -290,9 +345,19 @@ describe('runChatClient', () => {
   it('ends without an error on Ctrl+C in a terminal', async () => {
     const h = await harness();
     const chat = startChat(h.paths, { tty: true });
-    await chat.waitForText('Connected to the harness.');
+    await chat.waitForText('Connected to Ada. It is running.');
     chat.input.write('\x03');
     await expect(chat.done).resolves.toBeUndefined();
+  });
+});
+
+describe('greeting', () => {
+  const base = { agentName: 'Ada', setUp: true, paused: false, pauseReason: '', resumeHint: '', setupCommand: 'mission-agent setup --root /r' };
+  it('is shorter after a lost connection', () => {
+    expect(greeting(base, true)).toBe('Connected to Ada again. It is running.');
+    expect(greeting({ ...base, paused: true, pauseReason: 'You sent /pause.', resumeHint: 'Send /resume to end the pause.' }, true)).toBe(
+      'Connected to Ada again. It is paused: You sent /pause.\nSend /resume to end the pause.',
+    );
   });
 });
 

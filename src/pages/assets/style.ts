@@ -285,6 +285,71 @@ details.more { margin: var(--s3) 0; }
 details.more > summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 0.9rem; padding: var(--s1) 0; }
 details.more[open] > summary { margin-bottom: var(--s2); }
 
+/* ---------------------------------------------------------------- the small line about the step before */
+
+.carried { display: flex; align-items: center; gap: var(--s2); color: var(--ok); font-size: 0.9rem; font-weight: 600; margin: 0 0 var(--s3); }
+.carried-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--ok-bg);
+  font-size: 0.75rem;
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- the stages of Telegram */
+
+ol.stages { list-style: none; padding: 0; margin: 0; }
+li.stage { display: grid; grid-template-columns: 28px 1fr; gap: var(--s3); padding: var(--s4) 0; border-top: 1px solid var(--line); }
+li.stage:first-child { border-top: none; padding-top: 0; }
+li.stage:last-child { padding-bottom: 0; }
+.stage-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+li.stage.open .stage-mark { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+li.stage.done .stage-mark { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.stage-body { min-width: 0; }
+.stage-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s1) var(--s3); min-height: 28px; }
+h3.stage-title { margin: 0; font-size: 1rem; font-weight: 650; }
+li.stage.done h3.stage-title { font-weight: 500; }
+li.stage.later h3.stage-title { color: var(--muted); font-weight: 500; }
+li.stage.open .stage-head { margin-bottom: var(--s3); }
+.stage-head button.quiet { margin: 0; min-height: 32px; font-size: 0.875rem; }
+.stage-detail { margin: var(--s1) 0 0; }
+.stage-actions { margin-top: var(--s2); }
+.stage-actions button { margin: 0; }
+.stage-actions > button.quiet:first-child { margin-left: calc(-1 * var(--s2)); }
+ol.send-list { margin: var(--s3) 0 var(--s4); padding-left: 1.4em; }
+ol.send-list li { margin: var(--s2) 0; padding-left: var(--s1); }
+ol.send-list button.copy { margin: 0 var(--s2) 0 var(--s2); min-height: 28px; padding: 2px 8px; font-size: 0.85rem; }
+.topic-note { margin: var(--s3) 0 0; }
+.topic-note .row { margin-top: var(--s2); }
+.topic-note .row > * { margin: 0; }
+.telegram .wait .wait-title { margin-bottom: var(--s3); }
+.telegram .wait > button.quiet { margin-left: calc(-1 * var(--s2)); margin-bottom: 0; }
+.telegram + .stage-actions { margin-top: var(--s4); }
+.pair { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s4) var(--s5); margin: 0 0 var(--s3); }
+.pair-qr { flex: none; width: 200px; }
+.pair-qr .help { margin-top: var(--s2); }
+.pair-text { flex: 1 1 220px; min-width: 0; }
+.pair-text a.button { margin: 0 0 var(--s3); }
+.pair-code { font-size: 0.95rem; letter-spacing: 0.08em; }
+/* A QR code stays dark on white in both themes, so a phone can read it. */
+svg.qr { display: block; width: 200px; height: 200px; background: #ffffff; border-radius: var(--radius-sm); border: 1px solid var(--line); }
+
 /* ---------------------------------------------------------------- fields and buttons */
 
 .field { margin: 0 0 var(--s4); }
@@ -332,6 +397,25 @@ button.secondary { background: var(--surface); color: var(--fg); border-color: v
 button.secondary:hover { background: var(--panel); border-color: var(--muted); }
 button.quiet { background: transparent; border-color: transparent; color: var(--muted); padding-left: var(--s2); padding-right: var(--s2); font-weight: 500; }
 button.quiet:hover { color: var(--fg); background: var(--panel); }
+a.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+  text-decoration: none;
+  margin: var(--s1) var(--s2) var(--s1) 0;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+a.button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+a.button:focus-visible { border-radius: var(--radius-sm); }
+a.button.secondary { background: var(--surface); color: var(--fg); border-color: var(--line-strong); }
+a.button.secondary:hover { background: var(--panel); border-color: var(--muted); }
 button.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
 button.danger:hover { background: var(--bad-bg); }
 .actions-quiet > button.quiet:first-child, .login-foot > button.quiet { margin-left: calc(-1 * var(--s2)); }

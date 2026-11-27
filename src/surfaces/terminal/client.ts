@@ -9,6 +9,7 @@ import {
   type ChatApprovalClosedEvent,
   type ChatApprovalEvent,
   type ChatApprovalReply,
+  type ChatHelloEvent,
   type ChatMessageEvent,
   type ChatNoticeEvent,
 } from './events.js';
@@ -84,6 +85,25 @@ export function parseLine(text: string, numbers: number[]): ParsedLine {
   return rest === '' ? { kind: 'answer', number, decision } : { kind: 'answer', number, decision, reason: rest };
 }
 
+const HOW_TO_CHAT = 'Type a message and press Enter. Ctrl+C ends the chat.';
+
+/**
+ * The first lines of a chat: who it talks to and the state of the agent now. `again` is true after
+ * the connection was lost, and the lines are then shorter.
+ */
+export function greeting(h: ChatHelloEvent, again: boolean): string {
+  const connected = again ? `Connected to ${h.agentName} again.` : `Connected to ${h.agentName}.`;
+  if (!h.setUp) {
+    return [`${connected} The agent is not set up yet, so it does not answer messages.`, `Set it up with: ${h.setupCommand}`, 'Ctrl+C ends the chat.'].join('\n');
+  }
+  if (h.paused) {
+    const lines = [`${connected} It is paused: ${h.pauseReason}`, h.resumeHint];
+    if (!again) lines.push(HOW_TO_CHAT);
+    return lines.join('\n');
+  }
+  return again ? `${connected} It is running.` : `${connected} It is running. ${HOW_TO_CHAT}`;
+}
+
 export async function runChatClient(options: ChatClientOptions): Promise<void> {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
@@ -110,6 +130,8 @@ export async function runChatClient(options: ChatClientOptions): Promise<void> {
   const ended = new AbortController();
   let streamAbort: AbortController | undefined;
   let shownEarlierHeading = false;
+  /** What the next connection says first: the whole greeting, a short one after a lost connection, or nothing. */
+  let greet: 'first' | 'again' | 'none' = 'first';
 
   /** Prints above the line the user is typing, then draws the prompt and the typed text again. */
   function print(text: string): void {
@@ -194,7 +216,17 @@ export async function runChatClient(options: ChatClientOptions): Promise<void> {
   }
 
   function onEvent(event: string, data: unknown): void {
+    if (event !== 'hello' && greet !== 'none') {
+      // A harness that sends no hello event: a greeting without the state.
+      print(greet === 'first' ? `Connected to the harness. ${HOW_TO_CHAT}\n` : 'Connected to the harness again.\n');
+      greet = 'none';
+    }
     switch (event) {
+      case 'hello': {
+        if (greet !== 'none') print(`${greeting(data as ChatHelloEvent, greet === 'again')}\n`);
+        greet = 'none';
+        break;
+      }
       case 'message': {
         const m = data as ChatMessageEvent;
         if (m.earlier) showEarlierHeading();
@@ -265,8 +297,8 @@ export async function runChatClient(options: ChatClientOptions): Promise<void> {
         earlier = new Map([...waiting.values()].map((w) => [w.id, w.number]));
         waiting.clear();
         shownEarlierHeading = false;
-        if (first) print('Connected to the harness. Type a message and press Enter. Ctrl+C ends the chat.\n');
-        else if (saidLost) print('Connected to the harness again.\n');
+        // The hello event, the first one the harness sends, says who the chat talks to.
+        greet = first ? 'first' : saidLost ? 'again' : 'none';
         first = false;
         saidLost = false;
         try {

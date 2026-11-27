@@ -6,6 +6,9 @@ import { terminalClaudeCommand } from '../run/index.js';
 import { MODEL_API_KEY, TELEGRAM_BOT_TOKEN } from '../secrets/index.js';
 import { textUpdate, USER } from '../surfaces/telegram/test-helpers.js';
 import { SYS_GENERAL, SYS_MISSION_ADMIN } from '../types.js';
+import { qrEncode } from './qr.js';
+import { pairLink } from './setup-routes.js';
+import { collectEvents } from '../server/test-helpers.js';
 import { pagesRig, until, type PagesRig, type RigOptions } from './test-helpers.js';
 
 const API_KEY = 'sk-ant-api03-test-value-0123456789';
@@ -44,7 +47,14 @@ type State = {
     signIn: { state: string; reason?: string; startedAt?: string; expiresAt?: string };
     signInAvailable: boolean;
   };
-  telegram: { tokenPresent: boolean; userId: number | null; surfaceRunning: boolean; pairing: { state: string; code?: string; userId?: number; reason?: string } };
+  telegram: {
+    tokenPresent: boolean;
+    userId: number | null;
+    surfaceRunning: boolean;
+    pairing: { state: string; code?: string; userId?: number; reason?: string };
+    pairLink: string | null;
+    pairQr: string[] | null;
+  };
   credentials: { id: string; present: boolean }[];
 };
 
@@ -378,6 +388,30 @@ describe('credentials (§5.2, §J.3)', () => {
   });
 });
 
+describe('the terminal chat after the first setup', () => {
+  it('greets with the state now, and keeps no notice of the pause that is over', async () => {
+    // No agent.yaml: the harness starts paused and says so while no chat is open.
+    const r = await rig();
+    expect(r.harness.status().paused).toBe(true);
+
+    // The setup page saves the name. The login is ready, so the pause ends while no chat is open.
+    // A mission answer sent meanwhile is still kept.
+    expect((await saveConfig(r, { agent_name: 'Ada' })).status).toBe(200);
+    await until(() => !r.harness.status().paused, 'the end of the pause');
+    await r.harness.terminal.send({ missionId: SYS_GENERAL, label: 'Ada · General', text: 'An answer.' });
+
+    const chat = await collectEvents(`${r.base}/api/chat/stream`, r.token);
+    await until(() => chat.events.length >= 2, 'the hello event and the kept answer');
+    await new Promise((res) => setTimeout(res, 100));
+    chat.close();
+    expect(chat.events[0]).toEqual({
+      event: 'hello',
+      data: { agentName: 'Ada', setUp: true, paused: false, pauseReason: '', resumeHint: '', setupCommand: `mission-agent setup --root ${r.root}` },
+    });
+    expect(chat.events.slice(1).map((e) => (e.data as { text: string }).text)).toEqual(['An answer.']);
+  });
+});
+
 describe('Telegram (§5.1 step 3)', () => {
   it('checks the bot and says whether topic mode is on', async () => {
     const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
@@ -417,6 +451,44 @@ describe('Telegram (§5.1 step 3)', () => {
     expect((await r.post('/api/setup/telegram/forget')).status).toBe(200);
     expect(agentFile(r)).not.toContain('telegram_user_id');
     expect(r.harness.telegram.running()).toBe(false);
+  });
+
+  it('gives the link to the bot and its QR code only while a pairing waits and the bot is known', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
+    await r.post('/api/setup/secret', { id: TELEGRAM_BOT_TOKEN, value: BOT_TOKEN });
+    expect((await state(r)).telegram).toMatchObject({ pairLink: null, pairQr: null });
+
+    // A pairing waits, but the bot was not checked, so its user name is not known.
+    const started = await r.json<{ pairing: { code: string } }>(await r.post('/api/setup/telegram/pair'));
+    expect((await state(r)).telegram).toMatchObject({ pairLink: null, pairQr: null });
+
+    await r.post('/api/setup/telegram/check');
+    const s = await state(r);
+    const link = `https://t.me/ada_bot?start=${started.pairing.code}`;
+    expect(s.telegram.pairLink).toBe(link);
+    expect(s.telegram.pairQr).toEqual(qrEncode(link).rows);
+    expect(JSON.stringify(s)).not.toContain(BOT_TOKEN);
+
+    // Pressing Start in Telegram sends /start and the code. That pairs the account.
+    await until(() => r.telegram.calls('getUpdates').length > 0, 'the pairing to poll');
+    r.telegram.push(textUpdate(r.telegram, `/start ${started.pairing.code}`));
+    await until(async () => (await state(r)).telegram.pairing.state === 'paired', 'the pairing');
+    expect((await state(r)).telegram).toMatchObject({ userId: USER, pairLink: null, pairQr: null });
+  });
+
+  it('gives no link for a bot user name of an unexpected form', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
+    await r.post('/api/setup/secret', { id: TELEGRAM_BOT_TOKEN, value: BOT_TOKEN });
+    r.telegram.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', username: 'a/b?c', has_topics_enabled: true } }));
+    await r.post('/api/setup/telegram/check');
+    await r.post('/api/setup/telegram/pair');
+    const s = await state(r);
+    expect(s.telegram.pairing.state).toBe('waiting');
+    expect(s.telegram).toMatchObject({ pairLink: null, pairQr: null });
+    expect(pairLink('ada_bot', '12345')).toBeUndefined();
+    expect(pairLink('ada', '123456')).toBeUndefined();
+    expect(pairLink('ada_bot', '123456')).toBe('https://t.me/ada_bot?start=123456');
+    await r.post('/api/setup/telegram/pair/cancel');
   });
 
   it('stops waiting for the code when asked, and starts nothing', async () => {

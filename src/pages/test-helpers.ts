@@ -278,6 +278,10 @@ export async function runPageScript(r: PagesRig, scripts: string[]): Promise<Pag
       tags.add(tag.toLowerCase());
       return new FakeNode(tag.toUpperCase());
     },
+    createElementNS(_ns: string, tag: string) {
+      tags.add(tag.toLowerCase());
+      return new FakeNode(tag.toLowerCase());
+    },
     createTextNode: textNode,
     getElementById: (id: string) => (id === 'app' ? app : null),
     addEventListener() {},

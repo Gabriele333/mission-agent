@@ -25,6 +25,7 @@ export {
   CRASHES_TO_PAUSE,
   pauseReason,
   readPause,
+  resumeHint,
   STATE_KEYS,
   type BlockerKind,
   type HoldKind,

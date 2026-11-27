@@ -82,6 +82,7 @@ import {
   recordAlive,
   recordCleanStop,
   recordStart,
+  resumeHint,
   STATE_KEYS,
   takeInterruptedRuns,
   type BlockerKind,
@@ -326,6 +327,19 @@ export function createHarness(options: HarnessOptions): Harness {
     server,
     missionName: (id) => registry.get(id)?.name,
     onError: (err) => log(`The terminal surface could not pass on a message: ${errorText(err)}`),
+    // A chat that connects learns the state of the agent now, so pause notices are not kept for it.
+    hello: () => {
+      const rec = dispatcher.pauseRecord();
+      const paused = dispatcher.isPaused();
+      return {
+        agentName: cfg().agentName,
+        setUp: loaded !== undefined,
+        paused,
+        pauseReason: paused ? pauseReason(rec) : '',
+        resumeHint: paused ? resumeHint(rec) : '',
+        setupCommand: `mission-agent setup --root ${shellQuote(paths.root)}`,
+      };
+    },
   });
   const surfaces = createSurfaceSet(
     () => (cfg().defaultSurface === 'telegram' ? TELEGRAM_SURFACE_ID : TERMINAL_SURFACE_ID),
@@ -480,6 +494,8 @@ export function createHarness(options: HarnessOptions): Harness {
         dispatcher.isPaused()
           ? `Fixed: ${before.reason} The agent is still paused: ${pauseReason(dispatcher.pauseRecord())}`
           : 'The agent is no longer paused. Runs start again.',
+        null,
+        { status: true },
       );
     }
   }
@@ -974,8 +990,8 @@ export function createHarness(options: HarnessOptions): Harness {
     if (dispatcher.isPaused()) {
       const text = `The harness started paused. ${pauseReason(dispatcher.pauseRecord())}`;
       log(text);
-      if (blocker?.kind === 'credential') terminal.notice(text, cfg().agentName);
-      else await dispatcher.notifyUser(text);
+      if (blocker?.kind === 'credential') terminal.notice(text, cfg().agentName, { status: true });
+      else await dispatcher.notifyUser(text, null, { status: true });
     }
 
     scheduler = createScheduler({

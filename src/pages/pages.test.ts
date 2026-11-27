@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Script } from 'node:vm';
+import { createContext, Script } from 'node:vm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { openStore } from '../db/index.js';
 import { STATE_KEYS } from '../harness/index.js';
@@ -107,6 +107,34 @@ describe('the rules of both pages (§J.3)', () => {
       expect(() => new Script(code, { filename: name })).not.toThrow();
     }
     expect(STYLE_CSS).toContain('prefers-color-scheme: dark');
+  });
+
+  it('allows a link to a Telegram chat as the only outside link, opened in a new tab', () => {
+    const attrs = (node: { a: Record<string, string> }) => node.a;
+    const document = {
+      createElement: () => ({ a: {} as Record<string, string>, setAttribute(this: { a: Record<string, string> }, k: string, v: string) { this.a[k] = v; }, appendChild() {} }),
+      createTextNode: (t: string) => t,
+    };
+    const ctx: Record<string, unknown> = { document, navigator: {} };
+    ctx.window = ctx;
+    createContext(ctx);
+    new Script(COMMON_JS).runInContext(ctx);
+    const el = (ctx.MA as { el: (tag: string, props: Record<string, unknown>) => { a: Record<string, string> } }).el;
+    expect(attrs(el('a', { href: '/setup' }))).toEqual({ href: '/setup' });
+    expect(attrs(el('a', { href: 'https://t.me/ada_bot?start=123456' }))).toEqual({ href: 'https://t.me/ada_bot?start=123456', target: '_blank', rel: 'noopener noreferrer' });
+    expect(attrs(el('a', { href: 'https://t.me/BotFather' }))).toMatchObject({ target: '_blank' });
+    for (const bad of [
+      'https://example.com/',
+      'http://t.me/ada_bot',
+      'https://t.me/ada_bot?start=12345',
+      'https://t.me/ada_bot?start=123456&x=1',
+      'https://t.me.example.com/ada_bot',
+      'https://t.me/ada',
+      'https://t.me/ada_bot/../x',
+      'javascript:alert(1)',
+    ]) {
+      expect(() => el('a', { href: bad }), bad).toThrow('an outside link is not allowed');
+    }
   });
 
   it('refuses a POST to every dashboard route: the dashboard only reads', async () => {

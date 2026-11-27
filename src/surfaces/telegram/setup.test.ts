@@ -29,6 +29,35 @@ describe('pairTelegramUser', () => {
     expect(polls.at(-1)!.params).toMatchObject({ offset: 6, timeout: 0 });
   });
 
+  it('accepts /start and the code, which Telegram sends when the user opens the link and presses Start', async () => {
+    const tg = fakeTelegram();
+    tg.push(textUpdate(tg, '/start 482913'));
+    const id = await pairTelegramUser({ token: TOKEN, code: '482913', timeoutMs: 60_000, fetchFn: tg.fetchFn });
+    expect(id).toBe(USER);
+    expect(tg.calls('getUpdates').at(-1)!.params).toMatchObject({ offset: 2, timeout: 0 });
+  });
+
+  it('refuses near misses of /start and the code', async () => {
+    const tg = fakeTelegram();
+    tg.push(
+      textUpdate(tg, '/start', { from: OTHER }),
+      textUpdate(tg, '/start 111111', { from: OTHER }),
+      textUpdate(tg, '/start  482913', { from: OTHER }),
+      textUpdate(tg, '/start482913', { from: OTHER }),
+      textUpdate(tg, '/START 482913', { from: OTHER }),
+      textUpdate(tg, '/start@ada_bot 482913', { from: OTHER }),
+      textUpdate(tg, '/start 482913 please', { from: OTHER }),
+      textUpdate(tg, 'please /start 482913', { from: OTHER }),
+      textUpdate(tg, 'my code is 482913', { from: OTHER }),
+      textUpdate(tg, '4829130', { from: OTHER }),
+      textUpdate(tg, '/start 482913', { chatId: -100, chatType: 'group', from: OTHER }),
+      textUpdate(tg, '\n/start 482913 '),
+    );
+    const id = await pairTelegramUser({ token: TOKEN, code: '482913', timeoutMs: 60_000, fetchFn: tg.fetchFn });
+    // Only the last message counts: it is the exact form, with white space around it.
+    expect(id).toBe(USER);
+  });
+
   it('keeps polling until the code arrives', async () => {
     const tg = fakeTelegram();
     tg.push(textUpdate(tg, 'hello'));

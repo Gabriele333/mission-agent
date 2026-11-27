@@ -22,6 +22,9 @@ export const SETUP_JS = `'use strict';
   let signInTimer = null;
   // Messages shown at the top of a part after an action, by part.
   const notes = {};
+  // A small line about the step before, such as "Step 2 is done.", shown only on the step it names.
+  // A note of one step never shows as a banner on the next step.
+  let carried = null;
 
   MA.setUnauthorized(function () {
     stopped = true;
@@ -310,7 +313,7 @@ export const SETUP_JS = `'use strict';
       if (s.state === 'done') {
         note('login', 'ok', 'You are signed in with your Claude plan. The login is ready.');
         if (wizard === 2) {
-          note('wizard', 'ok', 'The login is ready. You are signed in with your Claude plan.');
+          carried = { step: 3, text: 'Step 2 is done. You are signed in with your Claude plan.' };
           wizard = 3;
         }
       } else {
@@ -459,18 +462,95 @@ export const SETUP_JS = `'use strict';
     ]);
   }
 
-  // ------------------------------------------------------------ Telegram
+  // ------------------------------------------------------------ Telegram (§5.1 step 3)
 
+  // The Telegram part has three stages: create the bot, paste its token, connect the account.
+  // Only the current stage is open. A stage that is done is one line with a check mark.
+  // The page checks the bot after the token is saved, and starts the pairing by itself.
+
+  const BOTFATHER = 'https://t.me/BotFather';
+
+  // What the Telegram stages know that the harness does not keep. Kept in the page only.
+  const tg = {
+    // True when the user says that the bot exists, before a token is stored.
+    haveBot: false,
+    // True while the user enters a token for a bot that is already connected, and during a save.
+    newToken: false,
+    checking: false,
+    // The text of the last save or bot check that failed.
+    tokenError: null,
+    // The text of the last start of a pairing that failed.
+    pairError: null,
+    // The page checks the bot by itself once, and starts the pairing by itself once.
+    autoChecked: false,
+    autoPaired: false,
+    // A short text for a screen reader, after a stage ends.
+    said: '',
+  };
+
+  /** Asks the harness to check the bot with Telegram. The answer gives the bot's user name and whether Threaded Mode is on. */
   async function checkBot() {
+    tg.checking = true;
+    tg.tokenError = null;
+    render();
     const r = await MA.api('POST', '/api/setup/telegram/check');
+    tg.checking = false;
     if (r.ok && r.data && r.data.ok) {
-      note('telegram', r.data.topicsEnabled ? 'ok' : 'warn', r.data.topicsEnabled
-        ? 'The token works. The bot is @' + r.data.username + '. Topic mode is on.'
-        : 'The token works. The bot is @' + r.data.username + ', but topic mode is off. Turn it on for the bot in BotFather, then check again. Without it the agent cannot give each mission its own thread.');
+      tg.newToken = false;
+      tg.said = 'Bot @' + r.data.username + ' connected.' + (r.data.topicsEnabled ? '' : ' Threaded Mode is off.');
     } else {
-      note('telegram', 'bad', MA.errorText(r));
+      tg.tokenError = MA.errorText(r);
     }
     await reload();
+  }
+
+  /** Stores the token in one POST, empties the box, and checks the bot at once. */
+  async function saveToken(input, button) {
+    let value = input.value;
+    input.value = '';
+    if (value.trim() === '') {
+      tg.tokenError = 'The box is empty. Paste the token that BotFather sent you.';
+      render();
+      return;
+    }
+    button.disabled = true;
+    tg.newToken = true;
+    tg.tokenError = null;
+    const r = await MA.api('POST', '/api/setup/secret', { id: data.telegram.tokenId, value: value });
+    value = '';
+    if (!r.ok) {
+      tg.tokenError = MA.errorText(r);
+      await reload();
+      return;
+    }
+    tg.autoChecked = true;
+    await checkBot();
+  }
+
+  async function startPairing() {
+    tg.autoPaired = true;
+    tg.pairError = null;
+    const r = await MA.api('POST', '/api/setup/telegram/pair');
+    if (!r.ok) tg.pairError = MA.errorText(r);
+    await reload();
+  }
+
+  /** True when the bot works and Threaded Mode is on, so the account can be connected. */
+  function canPair() {
+    const t = data.telegram;
+    return t.tokenPresent && !!t.bot && t.bot.topicsEnabled && !tg.newToken && !tg.checking;
+  }
+
+  /** Checks the bot and starts the pairing by themselves, each once, while the Telegram stages show. */
+  function telegramAuto() {
+    if (!data || (wizard !== null && wizard !== 3)) return;
+    const t = data.telegram;
+    if (t.tokenPresent && !t.bot && !tg.checking && !tg.autoChecked && !tg.newToken) {
+      tg.autoChecked = true;
+      checkBot();
+      return;
+    }
+    if (canPair() && t.userId === null && t.pairing.state === 'idle' && !tg.autoPaired && !tg.pairError) startPairing();
   }
 
   function watchPairing() {
@@ -483,61 +563,250 @@ export const SETUP_JS = `'use strict';
       pairTimer = null;
       const r = await MA.api('GET', '/api/setup/telegram/pair');
       if (!r.ok) return;
-      if (r.data.pairing.state === 'waiting') watchPairing();
-      else {
-        const p = r.data.pairing;
-        if (p.state === 'paired') note('telegram', 'ok', 'Your Telegram account is paired. The bot now accepts messages from that account only.');
-        else note('telegram', p.state === 'cancelled' ? 'warn' : 'bad', p.reason);
-        await reload();
+      if (r.data.pairing.state === 'waiting') {
+        watchPairing();
+        return;
       }
+      const p = r.data.pairing;
+      const t = data.telegram;
+      if (p.state === 'paired') {
+        tg.said = 'Your Telegram account is paired.';
+        if (wizard === 3) {
+          // The step is done, so the page moves on. The next step says so in one small line.
+          carried = { step: 4, text: 'Step 3 is done. Your Telegram account is paired' + (t.bot ? ' with @' + t.bot.username : '') + '.' };
+          wizard = 4;
+        } else if (wizard === null) {
+          note('telegram', 'ok', 'Your Telegram account is paired. The bot now accepts messages from that account only.');
+        }
+      } else if (t.userId !== null && wizard === null) {
+        // A pairing of another account ended without a new account. Stage 3 stays done, so a note says it.
+        note('telegram', p.state === 'cancelled' ? 'warn' : 'bad', p.reason);
+      }
+      await reload();
     }, 2000);
   }
 
-  function telegramBody() {
+  /** One stage. state is done, open or later. head holds the quiet actions next to the title. */
+  function stage(n, state, title, items, head) {
+    return el('li', { className: 'stage ' + state, attrs: state === 'open' ? { 'aria-current': 'step' } : {} }, [
+      el('span', { className: 'stage-mark', attrs: { 'aria-hidden': 'true' }, text: state === 'done' ? '✓' : String(n) }),
+      el('div', { className: 'stage-body' }, [
+        el('div', { className: 'stage-head' }, [
+          el('h3', { className: 'stage-title' }, [state === 'done' ? el('span', { className: 'sr-only', text: 'Done: ' }) : null, title]),
+          head || null,
+        ]),
+      ].concat(items || [])),
+    ]);
+  }
+
+  function quietButton(text, onClick) {
+    return el('button', { type: 'button', className: 'quiet', text: text, on: { click: onClick } });
+  }
+
+  function checkingLine() {
+    return el('p', { className: 'wait-title small', attrs: { role: 'status' } }, [el('span', { className: 'spinner', attrs: { 'aria-hidden': 'true' } }), 'Checking the bot with Telegram.']);
+  }
+
+  /** Stage 1: the user creates the bot in a chat with BotFather. */
+  function createBotItems() {
+    const copied = el('span', { className: 'muted small', attrs: { role: 'status' } });
+    const name = data.agentName ? data.agentName : 'Ada';
+    return [
+      el('p', { text: 'BotFather is the Telegram bot that creates bots. Only a person can do this step, so the page cannot do it for you.' }),
+      el('a', { className: 'button', href: BOTFATHER, text: 'Open BotFather in Telegram' }),
+      el('ol', { className: 'send-list' }, [
+        el('li', null, [
+          'Send ', el('code', { text: '/newbot' }), '.',
+          el('button', { type: 'button', className: 'quiet copy', text: 'Copy', attrs: { 'aria-label': 'Copy /newbot' }, on: { click: async function () {
+            copied.textContent = (await MA.copy('/newbot')) ? 'Copied.' : 'The browser did not allow copying.';
+          } } }),
+          copied,
+        ]),
+        el('li', { text: 'Send a name for the bot, such as ' + name + '.' }),
+        el('li', null, ['Send a user name that ends in ', el('code', { text: 'bot' }), ', such as ', el('code', { text: 'my_agent_bot' }), '.']),
+        el('li', { text: 'BotFather answers with a token. Copy it.' }),
+      ]),
+      el('button', { type: 'button', className: 'secondary', text: 'I have the token', on: { click: function () { tg.haveBot = true; render(); } } }),
+    ];
+  }
+
+  /** Stage 2: the token. It is sent once and never shown again. Saving it checks the bot. */
+  function tokenItems() {
+    const t = data.telegram;
+    // A check that the page started by itself shows only that it checks.
+    if (tg.checking && !tg.newToken) return [checkingLine()];
+    const inputId = 'secret-' + t.tokenId.replace(/[^a-z0-9]+/g, '-');
+    const input = el('input', {
+      id: inputId,
+      type: 'password',
+      autocomplete: 'new-password',
+      spellcheck: false,
+      placeholder: '123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ',
+      attrs: { 'aria-describedby': 'tg-token-help' + (tg.tokenError ? ' tg-token-error' : ''), 'aria-invalid': tg.tokenError ? 'true' : 'false' },
+    });
+    const button = el('button', { type: 'submit', text: 'Save and check', disabled: tg.checking });
+    const form = el('form', { className: 'row input-row', attrs: { 'aria-label': 'Bot token' } }, [input, button]);
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      saveToken(input, button);
+    });
+    const quiet = [];
+    if (!t.tokenPresent) quiet.push(quietButton('Show how to create the bot', function () { tg.haveBot = false; tg.tokenError = null; render(); }));
+    if (t.tokenPresent && t.bot && tg.newToken && !tg.checking) quiet.push(quietButton('Keep @' + t.bot.username, function () { tg.newToken = false; tg.tokenError = null; render(); }));
+    if (t.tokenPresent && tg.tokenError && !tg.checking) quiet.push(quietButton('Check again', checkBot));
+    if (t.tokenPresent && wizard === null && !tg.checking) {
+      quiet.push(el('button', { type: 'button', className: 'danger', text: 'Delete the token', on: { click: async function () {
+        if (!window.confirm('Delete the bot token from the Keychain?')) return;
+        const r = await MA.api('POST', '/api/setup/secret/delete', { id: t.tokenId });
+        tg.newToken = false;
+        tg.haveBot = false;
+        tg.tokenError = r.ok ? null : MA.errorText(r);
+        if (r.ok) note('telegram', 'ok', 'The bot token is deleted from the Keychain.');
+        await reload();
+      } } }));
+    }
+    return [
+      el('div', { className: 'field' }, [
+        el('label', { htmlFor: inputId, text: 'Bot token' }),
+        form,
+        el('p', { className: 'help', id: 'tg-token-help', text: 'The token is stored in the macOS Keychain. The page never shows it again.' }),
+      ]),
+      tg.checking ? checkingLine() : null,
+      tg.tokenError ? el('p', { className: 'error', id: 'tg-token-error', attrs: { role: 'alert' }, text: tg.tokenError }) : null,
+      quiet.length > 0 ? el('div', { className: 'row stage-actions' }, quiet) : null,
+    ];
+  }
+
+  /** The note when Threaded Mode is off. The agent cannot write to the user in Telegram without it. */
+  function topicNote(bot) {
+    const again = el('button', { type: 'button', text: tg.checking ? 'Checking' : 'Check again', disabled: tg.checking, on: { click: checkBot } });
+    return el('div', { className: 'banner warn topic-note', attrs: { role: 'status' } }, [
+      el('p', null, el('strong', { text: 'Turn on Threaded Mode for @' + bot.username + '.' })),
+      el('p', { text: 'Without it, the agent cannot create its threads, so it cannot answer you or ask for approvals in Telegram.' }),
+      el('p', { text: 'In Telegram, open BotFather and press Open to start its app. Choose @' + bot.username + ', open Bot Settings, and turn on Threaded Mode.' }),
+      el('div', { className: 'row' }, [el('a', { className: 'button secondary', href: BOTFATHER, text: 'Open BotFather' }), again]),
+    ]);
+  }
+
+  /** The QR code of the link, for the camera of a phone. Dark squares on white, with a quiet zone of four squares. */
+  function qrNode(rows, who) {
+    return MA.qr(rows, 'QR code of the link that opens ' + who + ' in Telegram with the pairing code. The button "Open your bot in Telegram" does the same.');
+  }
+
+  /** Stage 3: the account. The link opens the bot with the code, and Start sends it. */
+  function pairItems() {
     const t = data.telegram;
     const p = t.pairing;
-    const items = [noteNode('telegram')];
-    items.push(el('p', { text: 'Create a bot with BotFather in Telegram, turn on topic mode for it, and enter its token here. The token is stored in the macOS Keychain.' }));
-    items.push(secretRow(t.tokenId, t.tokenPresent, 'Bot token', 'telegram'));
-    if (t.tokenPresent) items.push(el('button', { type: 'button', className: 'secondary', text: 'Check the bot', on: { click: checkBot } }));
-    if (t.bot) items.push(el('p', { className: 'small' }, ['Bot: @' + t.bot.username + '. Topic mode: ' + (t.bot.topicsEnabled ? 'on.' : 'off.')]));
-
-    items.push(el('h3', { text: 'Your Telegram account' }));
-    if (t.userId !== null) {
-      items.push(el('p', null, ['Paired with the account ', el('code', { text: String(t.userId) }), '. The bot accepts messages from this account only. ', t.surfaceRunning ? 'The bot is connected.' : 'The bot is not connected.']));
-    } else {
-      items.push(el('p', { className: 'muted', text: 'No account is paired yet. Without Telegram, the default surface is the terminal.' }));
-    }
+    const who = t.bot ? '@' + t.bot.username : 'your bot';
     if (p.state === 'waiting') {
-      items.push(el('div', { className: 'wait', attrs: { role: 'status' } }, [
-        el('p', null, ['Send this code to ' + (t.bot ? '@' + t.bot.username : 'your bot') + ' in a private chat: ']),
-        el('pre', { className: 'code-big', text: p.code }),
-        el('p', { className: 'help', text: 'The page waits until ' + MA.time(p.expiresAt) + '. The bot does not answer the code. The first sender of the code becomes the account of the agent.' }),
-        el('button', { type: 'button', className: 'secondary', text: 'Stop waiting', on: { click: async function () {
-          await MA.api('POST', '/api/setup/telegram/pair/cancel');
-        } } }),
-      ]));
-    } else if (t.tokenPresent) {
-      items.push(el('button', { type: 'button', className: 'secondary', text: t.userId === null ? 'Pair my account' : 'Pair another account', on: { click: async function () {
-        const r = await MA.api('POST', '/api/setup/telegram/pair');
-        if (!r.ok) note('telegram', 'bad', MA.errorText(r));
-        else delete notes.telegram;
-        await reload();
-      } } }));
+      const link = t.pairLink;
+      const stop = quietButton('Stop waiting', async function () {
+        await MA.api('POST', '/api/setup/telegram/pair/cancel');
+      });
+      const until = el('p', { className: 'help', text: 'The page waits until ' + MA.time(p.expiresAt) + '. The first account that sends the code becomes the account of the agent.' });
+      if (!link) {
+        return [el('div', { className: 'wait' }, [
+          el('p', { className: 'wait-title', attrs: { role: 'status' } }, [el('span', { className: 'spinner', attrs: { 'aria-hidden': 'true' } }), 'Waiting for the code']),
+          el('p', { text: 'Send this code to ' + who + ' in a private chat. This page moves on by itself.' }),
+          el('pre', { className: 'code-big', text: p.code }),
+          until,
+          stop,
+        ])];
+      }
+      return [el('div', { className: 'wait' }, [
+        el('p', { className: 'wait-title', attrs: { role: 'status' } }, [el('span', { className: 'spinner', attrs: { 'aria-hidden': 'true' } }), 'Waiting for you to press Start in Telegram']),
+        el('div', { className: 'pair' }, [
+          t.pairQr ? el('div', { className: 'pair-qr' }, [
+            qrNode(t.pairQr, who),
+            el('p', { className: 'help', text: 'Scan it with the camera of your phone, then press Start in Telegram.' }),
+          ]) : null,
+          el('div', { className: 'pair-text' }, [
+            el('a', { className: 'button', href: link, text: 'Open your bot in Telegram' }),
+            el('p', { text: 'Telegram opens the chat with ' + who + '. Press Start there. The bot does not reply, and this page moves on by itself.' }),
+            el('p', { className: 'help' }, ['Or send this code to ' + who + ': ', el('code', { className: 'pair-code', text: p.code })]),
+          ]),
+        ]),
+        until,
+        stop,
+      ])];
     }
-    if (t.userId !== null && p.state !== 'waiting') {
-      items.push(el('button', { type: 'button', className: 'danger', text: 'Stop using Telegram', on: { click: async function () {
-        if (!window.confirm('Remove your Telegram account from the agent? The default surface becomes the terminal.')) return;
-        const r = await MA.api('POST', '/api/setup/telegram/forget');
-        note('telegram', r.ok ? 'ok' : 'bad', r.ok ? 'Telegram is no longer used. The bot token stays in the Keychain until you delete it.' : MA.errorText(r));
-        await reload();
-      } } }));
-    }
+    const items = [];
+    if (tg.pairError) items.push(el('p', { className: 'error', attrs: { role: 'alert' }, text: tg.pairError }));
+    else if (p.state === 'failed') items.push(el('p', { className: 'error', attrs: { role: 'alert' }, text: p.reason }));
+    else if (p.state === 'cancelled') items.push(el('p', { className: 'muted', attrs: { role: 'status' }, text: p.reason }));
+    items.push(el('p', { text: 'The page shows a link to your bot. You press Start, and the bot learns your account.' }));
+    items.push(el('button', { type: 'button', text: p.state === 'idle' && !tg.pairError ? 'Connect my account' : 'Try again', on: { click: startPairing } }));
     return items;
   }
 
+  /** The three stages. The wizard and the Telegram part of all settings both show them. */
+  function telegramStages() {
+    const t = data.telegram;
+    const p = t.pairing;
+    const s1 = t.tokenPresent || tg.haveBot;
+    const s2 = t.tokenPresent && !!t.bot && !tg.newToken;
+    const s3 = t.userId !== null && p.state !== 'waiting';
+    const topicsOff = s2 && !t.bot.topicsEnabled;
+    const list = [];
+
+    list.push(s1
+      ? stage(1, 'done', 'Bot created in BotFather')
+      : stage(1, 'open', 'Create the bot', createBotItems()));
+
+    if (s2) {
+      list.push(stage(2, 'done', 'Bot @' + t.bot.username + ' connected', topicsOff ? [topicNote(t.bot)] : [],
+        quietButton('Use another bot', function () { tg.newToken = true; tg.tokenError = null; render(); })));
+    } else {
+      list.push(stage(2, s1 ? 'open' : 'later', 'Paste the token', s1 ? tokenItems() : []));
+    }
+
+    if (s3) {
+      list.push(stage(3, 'done', 'Paired with the account ' + t.userId, wizard === null
+        ? [el('p', { className: 'help stage-detail', text: 'The bot accepts messages from this account only. ' + (t.surfaceRunning ? 'The agent reads its messages now.' : 'The agent does not read its messages now.') })]
+        : []));
+    } else if (s2 && !topicsOff) {
+      list.push(stage(3, 'open', 'Connect your account', pairItems()));
+    } else {
+      list.push(stage(3, 'later', 'Connect your account', topicsOff ? [el('p', { className: 'help stage-detail', text: 'This comes after Threaded Mode is on.' })] : []));
+    }
+
+    const said = tg.said;
+    tg.said = '';
+    return el('div', { className: 'telegram' }, [
+      el('ol', { className: 'stages', attrs: { 'aria-label': 'Set up Telegram' } }, list),
+      el('p', { className: 'sr-only', attrs: { role: 'status' }, text: said }),
+    ]);
+  }
+
   function telegramPart() {
-    return card('part-telegram', 'Telegram', telegramBody());
+    const t = data.telegram;
+    const items = [
+      noteNode('telegram'),
+      el('p', { className: 'help', text: 'Chat with your agent from your phone. Without Telegram, you chat with the agent in a terminal on this computer.' }),
+      telegramStages(),
+    ];
+    if (t.userId !== null && t.pairing.state !== 'waiting') {
+      items.push(el('div', { className: 'row stage-actions' }, [
+        el('button', { type: 'button', className: 'secondary', text: 'Pair another account', on: { click: async function () {
+          delete notes.telegram;
+          await startPairing();
+          if (tg.pairError) {
+            note('telegram', 'bad', tg.pairError);
+            tg.pairError = null;
+            render();
+          }
+        } } }),
+        el('button', { type: 'button', className: 'danger', text: 'Stop using Telegram', on: { click: async function () {
+          if (!window.confirm('Remove your Telegram account from the agent? You then chat with the agent in a terminal on this computer.')) return;
+          // The page must not start a new pairing by itself after this.
+          tg.autoPaired = true;
+          const r = await MA.api('POST', '/api/setup/telegram/forget');
+          note('telegram', r.ok ? 'ok' : 'bad', r.ok ? 'Telegram is no longer used. The bot token stays in the Keychain until you delete it.' : MA.errorText(r));
+          await reload();
+        } } }),
+      ]));
+    }
+    return card('part-telegram', 'Telegram', items);
   }
 
   // ------------------------------------------------------------ credentials and service
@@ -781,16 +1050,16 @@ export const SETUP_JS = `'use strict';
   }
 
   function back() {
-    return el('button', { type: 'button', className: 'quiet', text: 'Back', on: { click: function () { delete notes.wizard; wizard -= 1; render(); } } });
+    return el('button', { type: 'button', className: 'quiet', text: 'Back', on: { click: function () { carried = null; wizard -= 1; render(); } } });
   }
 
   function allSettings() {
-    return el('a', { href: '#', className: 'quiet-link', text: 'Show all settings instead', on: { click: function (ev) { ev.preventDefault(); delete notes.wizard; wizard = null; render(); } } });
+    return el('a', { href: '#', className: 'quiet-link', text: 'Show all settings instead', on: { click: function (ev) { ev.preventDefault(); carried = null; wizard = null; render(); } } });
   }
 
   function next(text, enabled) {
     return el('button', { type: 'button', text: text, disabled: !enabled, on: { click: function () {
-      delete notes.wizard;
+      carried = null;
       if (wizard === STEPS.length) {
         wizard = null;
         finished = true;
@@ -806,8 +1075,13 @@ export const SETUP_JS = `'use strict';
     return el('section', { className: 'card step', attrs: { 'aria-labelledby': 'step-title' } }, [
       el('p', { className: 'step-caption', text: 'Step ' + n + ' of ' + STEPS.length }),
       el('h2', { className: 'step-title', id: 'step-title', text: STEPS[n - 1] }),
-      noteNode('wizard'),
     ].concat(items));
+  }
+
+  /** The small line about the step before. It shows on the step it names only. */
+  function carriedLine() {
+    if (!carried || carried.step !== wizard) return null;
+    return el('p', { className: 'carried', attrs: { role: 'status' } }, [el('span', { className: 'carried-mark', attrs: { 'aria-hidden': 'true' }, text: '✓' }), carried.text]);
   }
 
   function wizardStep() {
@@ -829,10 +1103,19 @@ export const SETUP_JS = `'use strict';
       ]);
     }
     if (n === 3) {
+      const t = data.telegram;
+      const done = t.userId !== null;
+      const skip = el('button', { type: 'button', className: done ? '' : 'secondary', text: done ? 'Continue' : 'Skip for now', on: { click: async function () {
+        carried = null;
+        // The user said no to Telegram for now, so a pairing that waits is stopped.
+        if (!done && t.pairing.state === 'waiting') await MA.api('POST', '/api/setup/telegram/pair/cancel');
+        wizard = 4;
+        render();
+      } } });
       return step(3, [
-        el('p', { className: 'lead', text: 'Telegram is optional. You can skip it and add it later in this page.' }),
-        el('div', null, telegramBody()),
-        actions([back(), allSettings()], next(data.telegram.userId !== null ? 'Continue' : 'Skip Telegram', true)),
+        el('p', { className: 'lead', text: 'Chat with your agent from your phone, in Telegram. This is optional. Without it, you chat with the agent in a terminal on this computer.' }),
+        telegramStages(),
+        actions([back(), allSettings()], skip),
       ]);
     }
     if (n === 4) {
@@ -876,6 +1159,7 @@ export const SETUP_JS = `'use strict';
     if (wizard !== null) {
       out.push(el('h1', { className: 'page-title', text: 'First setup' }));
       out.push(progress());
+      out.push(carriedLine());
       out.push(wizardStep());
     } else {
       if (finished) out.push(el('div', { className: 'banner ok', attrs: { role: 'status' }, text: 'The first setup is done. Each part below can be changed at any time.' }));
@@ -891,6 +1175,7 @@ export const SETUP_JS = `'use strict';
       out.push(reachPart(), agentPart(), modelsPart(), limitsPart(), telegramPart(), credentialsPart(), servicePart(), systemPart());
     }
     MA.replace(app, el('div', { className: 'page ' + (wizard !== null ? 'wizard' : 'settings') }, out));
+    telegramAuto();
   }
 
   async function startPage() {

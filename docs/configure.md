@@ -80,9 +80,13 @@ mission-agent secret list --root ~/agents/ada
 
 Telegram is optional. Without it you chat in the terminal: `mission-agent chat --root ~/agents/ada`.
 
-1. Create a bot with BotFather in Telegram.
-2. Store its token: `mission-agent secret set credential:telegram.bot_token --root ~/agents/ada`.
-3. Open the Telegram part of the setup page. It shows a code. Send the code to your bot.
+The Telegram step of the setup page has three stages:
+
+1. Create a bot. The page links to BotFather in Telegram and lists what to send: `/newbot`, a name, then a user name that ends in `bot`. BotFather answers with a token.
+2. Paste the token. The page stores it in the macOS Keychain and checks the bot with Telegram at once. To store it from a terminal instead: `mission-agent secret set credential:telegram.bot_token --root ~/agents/ada`.
+3. Connect your account. The page shows a link to your bot and a QR code of the same link. Open it on your phone and press Start. The page sees your account and moves on. You can also send the six-digit code that the page shows to your bot.
+
+The agent writes to you in one thread per mission, so the bot needs Threaded Mode (topic mode). When it is off, the page says so after the bot check. Turn it on in BotFather: press Open to start its app, choose your bot, open Bot Settings, and turn on Threaded Mode. Then press Check again.
 
 The Telegram part has only been tested with a fake Telegram service so far.
 

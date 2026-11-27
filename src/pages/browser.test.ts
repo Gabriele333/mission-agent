@@ -3,12 +3,13 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { terminalClaudeCommand } from '../run/index.js';
-import { MODEL_API_KEY } from '../secrets/index.js';
+import { MODEL_API_KEY, TELEGRAM_BOT_TOKEN } from '../secrets/index.js';
 import { textUpdate, USER } from '../surfaces/telegram/test-helpers.js';
 import { SYS_GENERAL } from '../types.js';
 import { COMMON_JS } from './assets/common.js';
 import { DASHBOARD_JS } from './assets/dashboard.js';
 import { SETUP_JS } from './assets/setup.js';
+import { qrEncode } from './qr.js';
 import { pagesRig, runPageScript, until, type PagesRig, type RigOptions } from './test-helpers.js';
 
 /**
@@ -34,6 +35,29 @@ const BOT_TOKEN = '123456789:fake-bot-token-for-tests-only-000000';
 async function waitForStep(page: Awaited<ReturnType<typeof runPageScript>>, n: number, title: string): Promise<void> {
   await page.waitForText(`Step ${n} of 6`);
   expect(page.find((x) => x.tagName === 'H2' && x.textContent === title), title).toBeDefined();
+}
+
+/** The texts of the banners on the page. */
+function banners(page: Awaited<ReturnType<typeof runPageScript>>): string[] {
+  return page.app
+    .all()
+    .filter((n) => typeof n.className === 'string' && n.className.split(' ').includes('banner'))
+    .map((n) => n.textContent);
+}
+
+/** A link of the page by its text. */
+function link(page: Awaited<ReturnType<typeof runPageScript>>, text: string) {
+  const n = page.find((x) => x.tagName === 'A' && x.textContent === text);
+  if (n === undefined) throw new Error(`No link "${text}". The page says: ${page.text().slice(0, 800)}`);
+  return n;
+}
+
+/** Every attribute value and text on the page, to check that a secret is in none of them. */
+function everything(page: Awaited<ReturnType<typeof runPageScript>>): string {
+  return page.app
+    .all()
+    .flatMap((n) => [n.textContent, ...n.attributes.values(), typeof n.value === 'string' ? n.value : ''])
+    .join('\n');
 }
 
 const HOSTILE = '<img src=x onerror=alert(1)></script><script>alert(1)</script> "q" \'s\'';
@@ -102,7 +126,7 @@ describe('the setup page script', () => {
 
     await page.button('Continue').fire('click');
     await waitForStep(page, 3, 'Telegram');
-    await page.button('Skip Telegram').fire('click');
+    await page.button('Skip for now').fire('click');
     await waitForStep(page, 4, 'The limits and the models');
     page.byId('f-run-limits-max-steps').value = '20';
     await page.byId('f-run-limits-max-steps').parent?.parent?.fire('submit');
@@ -191,9 +215,19 @@ describe('the setup page script', () => {
     account.subscriptionType = 'pro';
     r.signIns[0]!.exit(0);
     await waitForStep(page, 3, 'Telegram');
-    expect(page.text()).toContain('The login is ready.');
     expect(r.harness.status().paused).toBe(false);
     expect(page.text()).not.toContain('secret-oauth-value');
+    // Step 3 says in one small line that the sign-in worked. No banner of step 2 shows on it.
+    const line = page.find((n) => n.className === 'carried');
+    expect(line?.textContent).toContain('Step 2 is done. You are signed in with your Claude plan.');
+    expect(banners(page)).toEqual([]);
+    expect(page.text()).not.toContain('The login is ready.');
+
+    // The line belongs to step 3 only.
+    await page.button('Skip for now').fire('click');
+    await waitForStep(page, 4, 'The limits and the models');
+    expect(page.text()).not.toContain('Step 2 is done');
+    expect(banners(page)).toEqual([]);
   });
 
   it('starts the sign-in with its button, and stops waiting when asked', async () => {
@@ -226,25 +260,139 @@ describe('the setup page script', () => {
 });
 
 describe('the Telegram part of the setup page script', () => {
-  it('stores the token, checks the bot, shows the code and reports the pairing', async () => {
+  it('stores the token, checks the bot by itself, opens the bot with the code, and reports the pairing', async () => {
     const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
     const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
-    await page.waitForText('Bot token');
+    await page.waitForText('Create the bot');
+
+    // Stage 1: BotFather, in a new tab, and what to send to it.
+    const botFather = link(page, 'Open BotFather in Telegram');
+    expect(botFather.getAttribute('href')).toBe('https://t.me/BotFather');
+    expect(botFather.getAttribute('target')).toBe('_blank');
+    expect(botFather.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(page.text()).toContain('Send /newbot.');
+    expect(page.text()).toContain('Send a user name that ends in bot');
+    expect(page.find((n) => n.id === 'secret-credential-telegram-bot-token')).toBeUndefined();
+    expect(page.text()).not.toContain('Connect your account'.concat('Telegram opens'));
+
+    // Stage 2: one field, with no credential id and no badge.
+    await page.button('I have the token').fire('click');
+    const token = page.byId('secret-credential-telegram-bot-token');
+    expect(token.type).toBe('password');
+    expect(page.text()).not.toContain('credential:telegram.bot_token');
+    expect(page.text()).not.toContain('no value');
+    expect(page.text()).toContain('The token is stored in the macOS Keychain. The page never shows it again.');
+    expect(page.find((n) => n.tagName === 'A' && n.textContent === 'Open BotFather in Telegram')).toBeUndefined();
+    token.value = BOT_TOKEN;
+    await token.parent?.fire('submit');
+    // Saving the token checks the bot with no other click.
+    await page.waitForText('Bot @ada_bot connected');
+    expect(r.telegram.calls('getMe')).toHaveLength(1);
+    expect(await r.secrets.get(TELEGRAM_BOT_TOKEN)).toBe(BOT_TOKEN);
+    expect(page.text()).not.toContain('Threaded Mode');
+
+    // Stage 3: the pairing starts by itself, and the link opens the bot with the code.
+    await page.waitForText('Waiting for you to press Start in Telegram');
+    const code = page.find((n) => n.className === 'pair-code')?.textContent ?? '';
+    expect(code).toMatch(/^\d{6}$/);
+    const open = link(page, 'Open your bot in Telegram');
+    expect(open.getAttribute('href')).toBe(`https://t.me/ada_bot?start=${code}`);
+    expect(open.getAttribute('target')).toBe('_blank');
+    expect(open.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(page.text()).toContain(`Or send this code to @ada_bot: ${code}`);
+    expect(page.text()).toContain('Scan it with the camera of your phone, then press Start in Telegram.');
+
+    // The QR code holds the same link: the page draws the matrix of the harness, with a quiet zone.
+    const svg = page.find((n) => n.tagName === 'svg');
+    const expected = qrEncode(`https://t.me/ada_bot?start=${code}`).rows;
+    expect(svg?.getAttribute('viewBox')).toBe(`0 0 ${expected.length + 8} ${expected.length + 8}`);
+    expect(svg?.getAttribute('role')).toBe('img');
+    expect(svg?.getAttribute('aria-label')).toContain('The button "Open your bot in Telegram" does the same.');
+    const dark = svg?.children.find((n) => n.tagName === 'path')?.getAttribute('d') ?? '';
+    expect(dark.split('M').length - 1).toBe(expected.join('').split('').filter((c) => c === '1').length);
+    expect(dark.startsWith(`M${expected[0]!.indexOf('1') + 4} 4h1v1h-1z`)).toBe(true);
+    expect(everything(page)).not.toContain(BOT_TOKEN);
+
+    // In Telegram the user presses Start, which sends /start and the code.
+    await until(() => r.telegram.calls('getUpdates').length > 0, 'the pairing to poll');
+    r.telegram.push(textUpdate(r.telegram, `/start ${code}`));
+    await page.waitForText('Your Telegram account is paired.', 6000);
+    expect(page.text()).toContain(`Paired with the account ${USER}`);
+    expect(page.button('Pair another account')).toBeDefined();
+    expect(page.button('Stop using Telegram')).toBeDefined();
+    expect(everything(page)).not.toContain(BOT_TOKEN);
+  });
+
+  it('says when Threaded Mode is off, holds the pairing back, and checks again', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n', secrets: { [TELEGRAM_BOT_TOKEN]: BOT_TOKEN } });
+    r.telegram.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', username: 'ada_bot' } }));
+    const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
+    // The token is stored already, so the page checks the bot by itself.
+    await page.waitForText('Turn on Threaded Mode for @ada_bot.');
+    expect(page.text()).toContain('Bot @ada_bot connected');
+    expect(page.text()).toContain('Without it, the agent cannot create its threads, so it cannot answer you or ask for approvals in Telegram.');
+    expect(page.text()).toContain('Choose @ada_bot, open Bot Settings, and turn on Threaded Mode.');
+    expect(page.text()).toContain('This comes after Threaded Mode is on.');
+    expect(r.telegram.calls('getUpdates')).toHaveLength(0);
+    expect(link(page, 'Open BotFather').getAttribute('href')).toBe('https://t.me/BotFather');
+
+    // The user turns it on in BotFather and checks again. The pairing then starts by itself.
+    const note = page.find((n) => typeof n.className === 'string' && n.className.includes('topic-note'));
+    const again = note?.all().find((n) => n.tagName === 'BUTTON' && n.textContent === 'Check again');
+    await again?.fire('click');
+    await page.waitForText('Waiting for you to press Start in Telegram');
+    expect(page.text()).not.toContain('Threaded Mode');
+    expect(r.telegram.calls('getMe')).toHaveLength(2);
+  });
+
+  it('shows an error of Telegram in plain words, and keeps the token stage open', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
+    r.telegram.script('getMe', () => ({ ok: false, error_code: 401, description: 'Unauthorized' }));
+    const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
+    await page.waitForText('Create the bot');
+    await page.button('I have the token').fire('click');
     const token = page.byId('secret-credential-telegram-bot-token');
     token.value = BOT_TOKEN;
     await token.parent?.fire('submit');
-    // Saving the token also checks the bot.
-    await page.waitForText('The token works. The bot is @ada_bot. Topic mode is on.');
-    expect(page.text()).not.toContain(BOT_TOKEN);
+    await page.waitForText('Telegram refused the bot token. Copy the token from BotFather again.');
+    expect(page.byId('secret-credential-telegram-bot-token').value).toBe('');
+    expect(page.text()).not.toContain('connected');
+    expect(r.telegram.calls('getUpdates')).toHaveLength(0);
+  });
 
-    await page.button('Pair my account').fire('click');
-    await page.waitForText('Send this code to @ada_bot in a private chat');
-    const code = page.find((n) => n.tagName === 'PRE' && /^\d{6}$/.test(n.textContent))?.textContent ?? '';
-    expect(code).toMatch(/^\d{6}$/);
+  it('in the first setup, pairs the account and moves on to the next step by itself', async () => {
+    const account: AccountInfo = {};
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n', account });
+    const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
+    await waitForStep(page, 2, 'The model login');
+    await page.button('Sign in with my Claude plan').fire('click');
+    await page.waitForText('Waiting for you to sign in');
+    account.email = 'user@example.com';
+    account.subscriptionType = 'pro';
+    r.signIns[0]!.exit(0);
+    await waitForStep(page, 3, 'Telegram');
+    expect(page.text()).toContain('Chat with your agent from your phone, in Telegram. This is optional.');
+    expect(page.text()).toContain('Without it, you chat with the agent in a terminal on this computer.');
+    expect(page.button('Skip for now')).toBeDefined();
+    expect(page.text()).not.toContain('default surface');
+
+    await page.button('I have the token').fire('click');
+    const token = page.byId('secret-credential-telegram-bot-token');
+    token.value = BOT_TOKEN;
+    await token.parent?.fire('submit');
+    await page.waitForText('Waiting for you to press Start in Telegram');
+    // Stage 1 and 2 are one line each now.
+    expect(page.text()).toContain('Done: Bot created in BotFather');
+    expect(page.text()).toContain('Done: Bot @ada_bot connected');
+    expect(page.find((n) => n.id === 'secret-credential-telegram-bot-token')).toBeUndefined();
+    const code = page.find((n) => n.className === 'pair-code')?.textContent ?? '';
     await until(() => r.telegram.calls('getUpdates').length > 0, 'the pairing to poll');
-    r.telegram.push(textUpdate(r.telegram, code));
-    await page.waitForText('Your Telegram account is paired.', 6000);
-    expect(page.text()).toContain(`Paired with the account ${USER}.`);
+    r.telegram.push(textUpdate(r.telegram, `/start ${code}`));
+
+    await waitForStep(page, 4, 'The limits and the models');
+    expect(page.find((n) => n.className === 'carried')?.textContent).toContain('Step 3 is done. Your Telegram account is paired with @ada_bot.');
+    expect(banners(page)).toEqual([]);
+    expect(r.harness.config()?.config.telegramUserId).toBe(USER);
   });
 });
 

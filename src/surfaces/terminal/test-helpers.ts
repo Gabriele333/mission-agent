@@ -2,6 +2,7 @@ import { createLocalServer, type LocalServer } from '../../server/index.js';
 import { tempPaths } from '../../server/test-helpers.js';
 import type { Paths } from '../../paths.js';
 import type { ApprovalAnswer, ApprovalRequest, IncomingMessage, Store, SurfaceHost } from '../../types.js';
+import type { ChatHelloEvent } from './events.js';
 import { createTerminalSurface, type TerminalSurface } from './surface.js';
 
 export interface FakeHost extends SurfaceHost {
@@ -57,13 +58,23 @@ export interface Harness {
   port: number;
   token: string;
   base: string;
+  /** The state that the hello event gives a chat that connects. A test can change it. */
+  state: ChatHelloEvent;
   stop(): Promise<void>;
 }
 
 /** A started local server with a started terminal surface and a fake host. */
 export async function startHarness(paths = tempPaths()): Promise<Harness> {
   const server = createLocalServer({ paths });
-  const surface = createTerminalSurface({ server });
+  const state: ChatHelloEvent = {
+    agentName: 'Ada',
+    setUp: true,
+    paused: false,
+    pauseReason: '',
+    resumeHint: '',
+    setupCommand: `mission-agent setup --root ${paths.root}`,
+  };
+  const surface = createTerminalSurface({ server, hello: () => ({ ...state }) });
   const host = fakeHost(() => surface);
   await surface.start(host);
   const { port, token } = await server.start();
@@ -75,6 +86,7 @@ export async function startHarness(paths = tempPaths()): Promise<Harness> {
     port,
     token,
     base: `http://127.0.0.1:${port}`,
+    state,
     async stop() {
       await surface.stop();
       await server.stop();

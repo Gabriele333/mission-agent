@@ -12,6 +12,7 @@ import {
   type Manifest,
   type MissionId,
   type MissionRegistry,
+  type OutgoingMessage,
   type RunEngine,
   type RunInput,
   type RunResult,
@@ -26,6 +27,7 @@ import {
   markRunStarted,
   pauseReason,
   readPause,
+  resumeHint,
   startOfLocalDay,
   startOfNextLocalDay,
   STATE_KEYS,
@@ -71,8 +73,11 @@ export interface Dispatcher {
   onEvent(missionId: MissionId, event: TriggerEvent): void;
   /** The message tool's route (§F.1): the surface of the chat message that started the run, or the default surface. */
   sendFromRun(missionId: MissionId, text: string, filePath?: string): Promise<void>;
-  /** A notice from the harness on the default surface. Never throws. */
-  notifyUser(text: string, missionId?: MissionId | null): Promise<void>;
+  /**
+   * A notice from the harness on the default surface. Never throws. `status` marks a notice about
+   * the state of the agent, such as a pause or its end (see `OutgoingMessage.status`).
+   */
+  notifyUser(text: string, missionId?: MissionId | null, options?: { status?: boolean }): Promise<void>;
   pauseRecord(): PauseRecord;
   isPaused(): boolean;
   /** A pause that only /resume ends. `stopRuns` stops every run in progress, as /pause does. */
@@ -167,10 +172,12 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
     }
   }
 
-  async function notifyUser(text: string, missionId: MissionId | null = null): Promise<void> {
+  async function notifyUser(text: string, missionId: MissionId | null = null, options: { status?: boolean } = {}): Promise<void> {
     const surface = surfaces.defaultSurface();
     try {
-      await surface.send({ missionId, label: deps.label(missionId), text });
+      const msg: OutgoingMessage = { missionId, label: deps.label(missionId), text };
+      if (options.status === true) msg.status = true;
+      await surface.send(msg);
     } catch (err) {
       log(`A notice could not be sent on ${surface.id}: ${errorText(err)}. The notice was: ${text}`);
     }
@@ -187,8 +194,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
   // ------------------------------------------------------------ pause
 
   function pausedText(): string {
-    const how = blocker !== undefined ? 'After you fix this, send /resume.' : 'Send /resume to end the pause.';
-    return `The agent is paused, so this message was not passed on. ${pauseReason(record())} ${how}`;
+    return `The agent is paused, so this message was not passed on. ${pauseReason(record())} ${resumeHint(record())}`;
   }
 
   async function holdPause(kind: HoldKind, reason: string, stopRuns: boolean): Promise<void> {
@@ -360,7 +366,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       setBlocker({ kind: 'login', reason, since: now().toISOString() });
       const text = `The agent is paused because the model login is not ready. ${reason}`;
       if (item.kind === 'chat') await reply(item.surface, manifest.id, text);
-      else await notifyUser(text);
+      else await notifyUser(text, null, { status: true });
       return;
     }
     const problem = problemText(manifest, item, result);

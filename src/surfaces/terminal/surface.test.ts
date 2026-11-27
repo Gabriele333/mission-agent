@@ -16,10 +16,16 @@ async function harness(): Promise<Harness> {
   return h;
 }
 
+/** Connects a chat. `events` leaves out the hello event, which `all` keeps. */
 async function connect(h: Harness) {
   const c = await collectEvents(`${h.base}/api/chat/stream`, h.token);
   cleanups.push(() => c.close());
-  return c;
+  return {
+    get events() {
+      return c.events.filter((e) => e.event !== 'hello');
+    },
+    all: c.events,
+  };
 }
 
 function postJson(h: Harness, path: string, body: unknown) {
@@ -74,6 +80,55 @@ describe('terminal surface', () => {
     await h.surface.send(msg('new'));
     await waitFor(() => second.events.length === 1, 'the new message');
     expect(second.events).toEqual([{ event: 'message', data: expect.objectContaining({ text: 'new' }) }]);
+  });
+
+  it('sends the state of the agent first, before what was kept', async () => {
+    const h = await harness();
+    await h.surface.send(msg('while away'));
+    h.state.paused = true;
+    h.state.pauseReason = 'The model login is not ready.';
+    h.state.resumeHint = 'After you fix this, send /resume.';
+    const c = await connect(h);
+    await waitFor(() => c.all.length === 2, 'the hello and the kept message');
+    expect(c.all[0]).toEqual({
+      event: 'hello',
+      data: {
+        agentName: 'Ada',
+        setUp: true,
+        paused: true,
+        pauseReason: 'The model login is not ready.',
+        resumeHint: 'After you fix this, send /resume.',
+        setupCommand: `mission-agent setup --root ${h.paths.root}`,
+      },
+    });
+    expect(c.all[1]).toMatchObject({ event: 'message', data: { text: 'while away', earlier: true } });
+  });
+
+  it('does not keep a status notice for a later chat, and keeps the other messages', async () => {
+    const h = await harness();
+    // The agent pauses and then resumes while no chat is open. A mission answers meanwhile.
+    await h.surface.send({ missionId: null, label: 'Ada', text: 'The harness started paused. No name yet.', status: true });
+    await h.surface.send(msg('Three new mails.'));
+    h.surface.notice('The agent is paused. The bot token was refused.', 'Ada', { status: true });
+    await h.surface.send({ missionId: null, label: 'Ada', text: 'The agent is no longer paused. Runs start again.', status: true });
+    await h.surface.send({ missionId: null, label: 'Ada', text: 'Version 0.2.0 of the harness is available.' });
+    const c = await connect(h);
+    await waitFor(() => c.events.length === 2, 'the kept messages');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(c.events.map((e) => (e.data as { text: string }).text)).toEqual(['Three new mails.', 'Version 0.2.0 of the harness is available.']);
+  });
+
+  it('still shows a status notice at once to a chat that is open', async () => {
+    const h = await harness();
+    const c = await connect(h);
+    await waitFor(() => h.surface.clientCount() === 1, 'the client');
+    await h.surface.send({ missionId: null, label: 'Ada', text: 'The agent is paused because the model login is not ready.', status: true });
+    h.surface.notice('The agent is no longer paused. Runs start again.', 'Ada', { status: true });
+    await waitFor(() => c.events.length === 2, 'the two notices');
+    expect(c.events.map((e) => [e.event, (e.data as { text: string }).text])).toEqual([
+      ['notice', 'The agent is paused because the model login is not ready.'],
+      ['notice', 'The agent is no longer paused. Runs start again.'],
+    ]);
   });
 
   it('passes a message or a command to the host and answers at once', async () => {

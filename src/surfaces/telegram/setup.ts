@@ -24,7 +24,11 @@ export async function checkBot(token: string, fetchFn?: FetchFn): Promise<BotChe
 
 export interface PairOptions {
   token: string;
-  /** The code shown to the user. The first private message whose text is this code wins. */
+  /**
+   * The code shown to the user. The first private message whose text is this code, or `/start`
+   * and one space and this code, wins. Telegram sends the second form when the user opens the
+   * bot with a link that holds the code and presses Start.
+   */
   code: string;
   /** How long to wait for the message. */
   timeoutMs: number;
@@ -38,11 +42,17 @@ export interface PairOptions {
 }
 
 /**
- * Waits for a private message whose text is exactly the code (white space around it is ignored)
- * and returns the numeric id of its sender. Other updates are read and dropped.
+ * Waits for a private message whose text is exactly the code, or exactly `/start <code>` with one
+ * space (white space around it is ignored), and returns the numeric id of its sender. Other updates are read and dropped.
  * The harness's own Telegram polling must not run at the same time: Telegram answers a second
  * `getUpdates` caller with an error (409).
  */
+/** True when the text is the code, or `/start` and one space and the code. Nothing looser counts. */
+export function isPairingText(text: string, code: string): boolean {
+  const t = text.trim();
+  return t === code || t === `/start ${code}`;
+}
+
 export async function pairTelegramUser(options: PairOptions): Promise<number> {
   const code = options.code.trim();
   if (code === '') throw new Error('The pairing code is empty.');
@@ -87,7 +97,7 @@ export async function pairTelegramUser(options: PairOptions): Promise<number> {
       const m = u.message;
       if (found !== undefined || !m || m.chat.type !== 'private' || !m.from || m.from.is_bot) continue;
       if (m.from.id !== m.chat.id) continue;
-      if (typeof m.text === 'string' && m.text.trim() === code) found = m.from.id;
+      if (typeof m.text === 'string' && isPairingText(m.text, code)) found = m.from.id;
     }
     if (found !== undefined) {
       // Marks the updates as read, so the harness does not take the code as a chat message.

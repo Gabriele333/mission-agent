@@ -453,6 +453,12 @@ export interface OutgoingMessage {
   label: string;
   text: string;
   filePath?: string;
+  /**
+   * True for a notice about the state of the agent, such as the start or the end of a pause. The
+   * state may have changed again before the user reads it, so the terminal shows it only to a chat
+   * that is open now and does not keep it for a later chat. Telegram sends it like any notice.
+   */
+  status?: true;
 }
 
 /** What a surface can ask of the harness. */

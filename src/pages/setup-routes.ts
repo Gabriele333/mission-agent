@@ -10,6 +10,7 @@ import { installService, ServiceError, servicePlan, serviceStatus, type ServiceO
 import { StoppedError } from '../surfaces/telegram/index.js';
 import { applyConfigPatch, readConfigView, readTexts, writeTexts } from './config-edit.js';
 import { bodyObject, errorText, fail } from './http.js';
+import { qrEncode } from './qr.js';
 import { shellQuote } from '../shell.js';
 import { GROUP_TITLES, runSystemChecks, type SystemCheck, type SystemCheckDeps } from '../system/index.js';
 
@@ -57,6 +58,16 @@ type Pairing =
 export { shellQuote };
 
 /**
+ * The link that opens the bot in Telegram with the pairing code. Pressing Start there sends
+ * "/start <code>" to the bot. Undefined unless the user name has the form Telegram gives and the
+ * code has six digits. The link holds no secret: the bot token is never part of it.
+ */
+export function pairLink(username: string, code: string): string | undefined {
+  if (!/^[A-Za-z0-9_]{5,32}$/.test(username) || !/^[0-9]{6}$/.test(code)) return undefined;
+  return `https://t.me/${username}?start=${code}`;
+}
+
+/**
  * The sign-in command of §A.5 with the real path, for a terminal. The page shows it and never runs it.
  * `program` is `claude` when it is on the PATH, else the path of the Claude Code program of the SDK.
  */
@@ -73,6 +84,25 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
   let signInSeen: string | undefined;
   let bot: { username: string; topicsEnabled: boolean } | undefined;
   const serviceOptions = (): ServiceOptions => ({ ...options.service, root: paths.root });
+  // The QR code of the last pairing link, made once per link.
+  let qrOf: { link: string; rows: string[] } | undefined;
+
+  /** The link and its QR code while a pairing waits and the bot's user name is known. */
+  function pairingLink(): { link: string | null; qr: string[] | null } {
+    if (pairing.state !== 'waiting' || bot === undefined) return { link: null, qr: null };
+    const link = pairLink(bot.username, pairing.code);
+    if (link === undefined) return { link: null, qr: null };
+    if (qrOf?.link !== link) {
+      try {
+        qrOf = { link, rows: qrEncode(link).rows };
+      } catch (err) {
+        // The page still shows the link and the code.
+        options.log(`The QR code of the pairing link could not be made: ${errorText(err)}`);
+        return { link, qr: null };
+      }
+    }
+    return { link, qr: qrOf.rows };
+  }
 
   /** The state of the sign-in. A sign-in that ended well counts as a login check that passed. */
   function signInState() {
@@ -105,6 +135,7 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
     const st = h.status();
     const cfg = h.config()?.config;
     const required = h.requiredCredentials();
+    const link = pairingLink();
     return {
       root: paths.root,
       agentName: st.agentName ?? null,
@@ -135,6 +166,8 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
         surfaceRunning: h.telegram.running(),
         bot: bot ?? null,
         pairing,
+        pairLink: link.link,
+        pairQr: link.qr,
       },
       credentials: await credentialList(required),
       commands: { chat: `mission-agent chat --root ${shellQuote(paths.root)}` },
@@ -273,7 +306,8 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
   const postPair: RouteHandler = async (_req, res) => {
     if (pairing.state === 'waiting') return res.json({ ok: true, pairing });
     if (!(await h.secrets.has(TELEGRAM_BOT_TOKEN))) return fail(res, 409, 'Enter the bot token first.');
-    // Six digits are easy to type on a phone. Only a private message to this bot with exactly this text counts.
+    // Six digits are easy to type on a phone. Only a private message to this bot counts, with exactly
+    // the code, or "/start" and the code, which Telegram sends when the user opens the page's link.
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
     const timeoutMs = options.pairTimeoutMs ?? DEFAULT_PAIR_MS;
     pairing = { state: 'waiting', code, expiresAt: new Date(Date.now() + timeoutMs).toISOString() };

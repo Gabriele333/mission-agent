@@ -12,6 +12,9 @@ export const COMMON_JS = `'use strict';
     'disabled', 'checked', 'readOnly', 'autocomplete', 'htmlFor', 'spellcheck', 'colSpan', 'selected', 'open',
   ]);
 
+  // The only outside links: a chat in Telegram, with or without a start code of six digits.
+  const TELEGRAM_LINK = /^https:[/][/]t[.]me[/][A-Za-z0-9_]{5,32}([?]start=[0-9]{6})?$/;
+
   /** Builds one element. props.text sets textContent, props.on adds listeners, props.attrs sets aria-, data-, role and inputmode attributes. */
   function el(tag, props, children) {
     const node = document.createElement(tag);
@@ -22,10 +25,18 @@ export const COMMON_JS = `'use strict';
       if (key === 'text') node.textContent = String(v);
       else if (key === 'className') node.className = String(v);
       else if (key === 'href') {
-        // Only links inside these pages.
+        // Links inside these pages, and links to a Telegram chat. A Telegram link opens in a new tab
+        // and sends no address of this page. It holds a user name and at most a code of six digits.
         const href = String(v);
-        if (href.charAt(0) !== '/' && href.charAt(0) !== '#') throw new Error('el(): an outside link is not allowed');
-        node.setAttribute('href', href);
+        if (href.charAt(0) === '/' || href.charAt(0) === '#') {
+          node.setAttribute('href', href);
+        } else if (TELEGRAM_LINK.test(href)) {
+          node.setAttribute('href', href);
+          node.setAttribute('target', '_blank');
+          node.setAttribute('rel', 'noopener noreferrer');
+        } else {
+          throw new Error('el(): an outside link is not allowed');
+        }
       } else if (key === 'on') {
         for (const ev of Object.keys(v)) node.addEventListener(ev, v[ev]);
       } else if (key === 'attrs') {
@@ -137,6 +148,40 @@ export const COMMON_JS = `'use strict';
     return typeof n === 'number' ? n.toLocaleString('en-US') : '';
   }
 
+  const SVG = 'http://www.w3.org/2000/svg';
+
+  /**
+   * Draws a QR code from its rows of '0' and '1', as one SVG image. Dark squares on white in both
+   * themes, with a quiet zone of four squares on each side, so a phone can read it. label is the
+   * text for a screen reader. The colours are SVG attributes, not style.
+   */
+  function qr(rows, label) {
+    const n = rows.length;
+    const size = n + 8;
+    const svg = document.createElementNS(SVG, 'svg');
+    svg.setAttribute('class', 'qr');
+    svg.setAttribute('viewBox', '0 0 ' + size + ' ' + size);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', String(label));
+    svg.setAttribute('shape-rendering', 'crispEdges');
+    const back = document.createElementNS(SVG, 'rect');
+    back.setAttribute('width', String(size));
+    back.setAttribute('height', String(size));
+    back.setAttribute('fill', '#ffffff');
+    svg.appendChild(back);
+    let d = '';
+    for (let y = 0; y < n; y++) {
+      const row = String(rows[y]);
+      if (row.length !== n || !/^[01]+$/.test(row)) throw new Error('qr(): the rows are not a square of 0 and 1');
+      for (let x = 0; x < n; x++) if (row.charAt(x) === '1') d += 'M' + (x + 4) + ' ' + (y + 4) + 'h1v1h-1z';
+    }
+    const dark = document.createElementNS(SVG, 'path');
+    dark.setAttribute('d', d);
+    dark.setAttribute('fill', '#000000');
+    svg.appendChild(dark);
+    return svg;
+  }
+
   /** Copies a text to the clipboard. Returns false when the browser refuses. */
   async function copy(text) {
     try {
@@ -160,6 +205,7 @@ export const COMMON_JS = `'use strict';
     bytes: bytes,
     number: number,
     copy: copy,
+    qr: qr,
     setUnauthorized: function (fn) { onUnauthorized = fn; },
   };
 })();

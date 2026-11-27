@@ -71,6 +71,11 @@ export function pauseReason(record: PauseRecord): string {
   return [record.blocker?.reason, record.hold?.reason].filter((r): r is string => r !== undefined && r !== '').join(' ');
 }
 
+/** How the user ends a pause: fix the cause first when something blocks the agent, then send /resume. */
+export function resumeHint(record: PauseRecord): string {
+  return record.blocker !== undefined ? 'After you fix this, send /resume.' : 'Send /resume to end the pause.';
+}
+
 // ---------------------------------------------------------------- crash rule (§H)
 
 export interface StartRecord {
