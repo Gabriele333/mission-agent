@@ -71,6 +71,53 @@ ask() {
   fi
 }
 
+# Prints the major version of Node.js, or nothing when there is no Node.js.
+node_major() {
+  command -v node >/dev/null 2>&1 || return 0
+  node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true
+}
+
+# Stops unless Node.js 24 or later is present. With Homebrew and a person to ask, it offers to install it.
+need_node() {
+  local major
+  major="$(node_major)"
+  if [ -n "$major" ] && [ "$major" -ge 24 ]; then
+    return 0
+  fi
+  if [ -z "$major" ]; then
+    say "Node.js is missing. The agent needs Node.js 24 or later."
+  else
+    say "This computer has Node.js $(node --version). The agent needs Node.js 24 or later."
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    local brew_command="brew install node"
+    [ -n "$major" ] && brew_command="brew upgrade node"
+    if can_ask; then
+      ask "Install it now with Homebrew ($brew_command)? [Y/n] "
+      case "$ANSWER" in
+        n | N | no | No | NO) fail "Install it with \"$brew_command\", then run this again." ;;
+      esac
+      # The command is one of the two fixed texts above, so it is safe to split into words.
+      # shellcheck disable=SC2086
+      $brew_command || fail "Homebrew could not install Node.js. Install it with \"$brew_command\", then run this again."
+      hash -r
+      major="$(node_major)"
+      if [ -n "$major" ] && [ "$major" -ge 24 ]; then
+        say "Node.js $(node --version) is installed."
+        return 0
+      fi
+      fail "Node.js 24 or later is still not found. Open a new terminal, then run this again."
+    fi
+    fail "Install it with \"$brew_command\", then run this again."
+  fi
+
+  say "Install it in one of these two ways:" >&2
+  say "  1. Download the macOS installer from https://nodejs.org and open it. It asks for your password." >&2
+  say "  2. Install Homebrew from https://brew.sh, then run: brew install node" >&2
+  fail "Then open a new terminal and run this again."
+}
+
 main() {
   local repo="${MISSION_AGENT_REPO:-https://github.com/Gabriele333/mission-agent.git}"
   local home_dir="${MISSION_AGENT_HOME:-$HOME/.mission-agent}"
@@ -116,13 +163,18 @@ main() {
   # ---------------------------------------------------------------- what the program needs
 
   [ "$(uname -s)" = "Darwin" ] || fail "mission-agent works on macOS only."
-  local tool
-  for tool in git node npm; do
-    command -v "$tool" >/dev/null 2>&1 || fail "\"$tool\" was not found. Install Node.js 24 or later, and git, then run this again."
-  done
-  local node_major
-  node_major="$(node -p 'process.versions.node.split(".")[0]')"
-  [ "$node_major" -ge 24 ] || fail "Node.js 24 or later is needed. This computer has $(node --version)."
+
+  # git comes with Apple's command line tools. Without them, /usr/bin/git exists but does not run,
+  # and running it makes macOS offer to install them.
+  if ! git --version >/dev/null 2>&1; then
+    say "git is missing. It comes with Apple's command line tools." >&2
+    say "Run this, and finish the window that opens:" >&2
+    say "  xcode-select --install" >&2
+    fail "Then run this again."
+  fi
+
+  need_node
+  command -v npm >/dev/null 2>&1 || fail "\"npm\" was not found. It comes with Node.js: install Node.js again, then run this again."
 
   # The command file quotes this path, so these characters would break it.
   case "$home_dir" in

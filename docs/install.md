@@ -5,7 +5,7 @@ One script installs the program, the `mission-agent` command and the service.
 ## What you need
 
 - macOS. Secrets are stored in the login Keychain.
-- Node.js 24 or later, and git.
+- Node.js 24 or later, and git. The script checks for both and says how to get the one that is missing. With Homebrew present, it offers to install Node.js for you.
 - A way to reach Claude: an API key from the Claude Console, or your own Claude plan. A plan also needs Claude Code installed, for its `claude` command.
 
 ## Run the script
@@ -30,7 +30,7 @@ The second way works only while the repository is public. Read a script before y
 
 ## What the script does
 
-1. It checks for macOS, Node.js 24, git and npm.
+1. It checks for macOS, git, Node.js 24 and npm. Without Node.js, it stops and shows two ways to install it: the installer from nodejs.org, or Homebrew.
 2. It gets the newest release with git and builds it in `~/.mission-agent/app`.
 3. It writes the command `~/.mission-agent/bin/mission-agent`. It links the command into a folder of your PATH when it can write to one. Otherwise it shows the line to add to `~/.zshrc`.
 4. It asks for the agent's root folder. See the next section.
