@@ -6,7 +6,7 @@ One script installs the program, the `mission-agent` command and the service.
 
 - macOS. Secrets are stored in the login Keychain.
 - Node.js 24 or later, and git. The script checks for both and says how to get the one that is missing. With Homebrew present, it offers to install Node.js for you.
-- A way to reach Claude: an API key from the Claude Console, or your own Claude plan. A plan also needs Claude Code installed, for its `claude` command.
+- A way to reach Claude: your own Claude plan, or an API key from the Claude Console. Claude Code comes with the program, so a plan needs no other install.
 
 ## Run the script
 

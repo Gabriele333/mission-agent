@@ -3,7 +3,7 @@ import { randomInt } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { EFFORTS } from '../config/index.js';
 import type { Harness } from '../harness/index.js';
-import type { LoginCheck } from '../run/index.js';
+import { terminalClaudeCommand, type LoginCheck } from '../run/index.js';
 import { isCredentialId, MODEL_API_KEY, TELEGRAM_BOT_TOKEN } from '../secrets/index.js';
 import type { RouteHandler } from '../server/index.js';
 import { installService, ServiceError, servicePlan, serviceStatus, type ServiceOptions } from '../service/index.js';
@@ -56,9 +56,12 @@ type Pairing =
 
 export { shellQuote };
 
-/** The sign-in command of §A.5 with the real path. The page shows it and never runs it. */
-export function signInCommand(sdkConfigDir: string): string {
-  return `CLAUDE_CONFIG_DIR=${shellQuote(sdkConfigDir)} claude auth login`;
+/**
+ * The sign-in command of §A.5 with the real path, for a terminal. The page shows it and never runs it.
+ * `program` is `claude` when it is on the PATH, else the path of the Claude Code program of the SDK.
+ */
+export function signInCommand(sdkConfigDir: string, program: string = terminalClaudeCommand()): string {
+  return `CLAUDE_CONFIG_DIR=${shellQuote(sdkConfigDir)} ${program} auth login`;
 }
 
 export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
@@ -66,10 +69,23 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
   let pairing: Pairing = { state: 'idle' };
   let pairAbort: AbortController | undefined;
   let lastLoginCheck: LoginCheck | undefined;
+  // The end time of the last sign-in that the page saw finish well.
+  let signInSeen: string | undefined;
   let bot: { username: string; topicsEnabled: boolean } | undefined;
   const serviceOptions = (): ServiceOptions => ({ ...options.service, root: paths.root });
 
+  /** The state of the sign-in. A sign-in that ended well counts as a login check that passed. */
+  function signInState() {
+    const s = h.signIn.state();
+    if (s.state === 'done' && s.endedAt !== signInSeen) {
+      signInSeen = s.endedAt;
+      lastLoginCheck = { ok: true };
+    }
+    return s;
+  }
+
   function loginState(): { state: 'ready' | 'not_ready' | 'unknown'; reason: string } {
+    signInState();
     if (h.config() === undefined) return { state: 'unknown', reason: 'The agent has no valid configuration yet.' };
     const blocker = h.status().pause.blocker;
     if (blocker?.kind === 'login') return { state: 'not_ready', reason: blocker.reason };
@@ -109,6 +125,8 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
         apiKeyId: MODEL_API_KEY,
         apiKeyPresent: await h.secrets.has(MODEL_API_KEY),
         signInCommand: signInCommand(paths.sdkConfigDir),
+        signIn: signInState(),
+        signInAvailable: h.signIn.available(),
       },
       telegram: {
         tokenId: TELEGRAM_BOT_TOKEN,
@@ -159,6 +177,23 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
     if (h.config() === undefined) return fail(res, 409, 'Save the agent name first.');
     lastLoginCheck = await h.checkLogin();
     res.json(lastLoginCheck.ok ? { ok: true } : { ok: false, error: lastLoginCheck.reason });
+  };
+
+  // The page starts Anthropic's own sign-in program and only watches whether it ended well.
+  // Nothing that the program prints reaches the page, and the page sends nothing to it.
+
+  const postSignInStart: RouteHandler = (_req, res) => {
+    const cfg = h.config()?.config;
+    if (cfg === undefined) return fail(res, 409, 'Save the agent name first.');
+    if (cfg.modelLogin !== 'subscription') return fail(res, 409, 'Choose "My own Claude plan" as the model login first.');
+    res.json({ ok: true, signIn: h.signIn.start() });
+  };
+
+  const getSignIn: RouteHandler = (_req, res) => res.json({ ok: true, signIn: signInState() });
+
+  const postSignInCancel: RouteHandler = (_req, res) => {
+    h.signIn.cancel();
+    res.json({ ok: true, signIn: signInState() });
   };
 
   // ------------------------------------------------------------ credentials
@@ -351,6 +386,9 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
     { method: 'POST', path: '/api/setup/config', handler: postConfig },
     { method: 'POST', path: '/api/setup/texts', handler: postTexts },
     { method: 'POST', path: '/api/setup/login/check', handler: postLoginCheck },
+    { method: 'POST', path: '/api/setup/login/start', handler: postSignInStart },
+    { method: 'GET', path: '/api/setup/login/sign-in', handler: getSignIn },
+    { method: 'POST', path: '/api/setup/login/cancel', handler: postSignInCancel },
     { method: 'POST', path: '/api/setup/secret', handler: postSecret },
     { method: 'POST', path: '/api/setup/secret/delete', handler: postSecretDelete },
     { method: 'POST', path: '/api/setup/telegram/check', handler: postTelegramCheck },

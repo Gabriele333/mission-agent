@@ -9,7 +9,7 @@ export const COMMON_JS = `'use strict';
   // become an attribute such as an event handler.
   const PROPS = new Set([
     'id', 'type', 'name', 'value', 'placeholder', 'min', 'max', 'step', 'rows', 'title',
-    'disabled', 'checked', 'readOnly', 'autocomplete', 'htmlFor', 'spellcheck', 'colSpan', 'selected',
+    'disabled', 'checked', 'readOnly', 'autocomplete', 'htmlFor', 'spellcheck', 'colSpan', 'selected', 'open',
   ]);
 
   /** Builds one element. props.text sets textContent, props.on adds listeners, props.attrs sets aria-, data-, role and inputmode attributes. */

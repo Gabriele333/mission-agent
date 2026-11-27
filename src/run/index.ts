@@ -19,6 +19,7 @@ export {
 } from './options.js';
 export {
   checkModelLogin,
+  configDirFor,
   createModelCaller,
   isNotLoggedIn,
   loginHelp,
@@ -31,3 +32,19 @@ export {
 } from './login.js';
 export { RunClock } from './clock.js';
 export { sdkQuery, type QueryFn, type RunQuery } from './sdk.js';
+export {
+  claudeOnPath,
+  createSignIn,
+  shippedClaudeBinary,
+  SIGN_IN_ARGS,
+  SIGN_IN_TIMEOUT_MS,
+  signInEnv,
+  signInProgram,
+  terminalClaudeCommand,
+  type SignIn,
+  type SignInChild,
+  type SignInDeps,
+  type SignInSpawn,
+  type SignInSpawnOptions,
+  type SignInState,
+} from './sign-in.js';

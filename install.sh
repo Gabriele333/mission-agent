@@ -699,10 +699,8 @@ main() {
       service="yes"
     elif can_ask; then
       say ""
-      say "The agent can run as a service of your account. macOS then starts it when you log in,"
-      say "and starts it again after a crash. This writes one file in ~/Library/LaunchAgents."
-      say "It needs no password. macOS shows a notice that a background item was added."
-      say "You can switch it off at any time in System Settings, under General, Login Items."
+      say "The service makes macOS start the agent at login and after a crash. It needs no password."
+      say "It writes one file in ~/Library/LaunchAgents. Switch it off in System Settings, General, Login Items."
       ask "Install the service? [Y/n] "
       case "$ANSWER" in
         n | N | no | No | NO) service="no" ;;
@@ -725,7 +723,19 @@ main() {
   fi
 
   say ""
-  "$cmd" service install --root "$root" || fail "The service could not be installed. The program itself is installed."
+  # The whole output goes to the install log. The terminal shows it only when the install fails.
+  local service_out plist_path
+  if service_out="$("$cmd" service install --root "$root" 2>&1)"; then
+    printf '%s\n' "$service_out" >>"$log"
+  else
+    printf '%s\n' "$service_out"
+    fail "The service could not be installed. The program itself is installed."
+  fi
+  plist_path="$(printf '%s\n' "$service_out" | sed -n 's/^  File:  *//p' | head -n 1)"
+  say "The service is installed. It starts the agent now, at each login and after a crash."
+  say "Its file is ${plist_path:-in ~/Library/LaunchAgents}. The details are in $log."
+  # A start that launchd held back, or that failed, is still shown in full.
+  printf '%s\n' "$service_out" | awk '/^launchctl could not start it now|^Warning:/ { shown = 1 } shown'
 
   # The service starts the harness. It answers within a few seconds.
   local waited=0
@@ -737,8 +747,7 @@ main() {
     fi
     sleep 1
   done
-  say ""
-  "$cmd" service status --root "$root"
+  "$cmd" service status --root "$root" >>"$log" 2>&1 || true
   say ""
   say "The agent runs as a service."
 

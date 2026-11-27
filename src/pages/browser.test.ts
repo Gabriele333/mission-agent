@@ -2,6 +2,7 @@ import type { AccountInfo } from '@anthropic-ai/claude-agent-sdk';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { terminalClaudeCommand } from '../run/index.js';
 import { MODEL_API_KEY } from '../secrets/index.js';
 import { textUpdate, USER } from '../surfaces/telegram/test-helpers.js';
 import { SYS_GENERAL } from '../types.js';
@@ -29,6 +30,12 @@ async function rig(options: RigOptions = {}): Promise<PagesRig> {
 
 const API_KEY = 'sk-ant-api03-browser-test-value-42';
 const BOT_TOKEN = '123456789:fake-bot-token-for-tests-only-000000';
+/** Waits for a step of the first setup: its caption and its title. */
+async function waitForStep(page: Awaited<ReturnType<typeof runPageScript>>, n: number, title: string): Promise<void> {
+  await page.waitForText(`Step ${n} of 6`);
+  expect(page.find((x) => x.tagName === 'H2' && x.textContent === title), title).toBeDefined();
+}
+
 const HOSTILE = '<img src=x onerror=alert(1)></script><script>alert(1)</script> "q" \'s\'';
 
 describe('the setup page script', () => {
@@ -67,13 +74,22 @@ describe('the setup page script', () => {
   it('goes through the six steps of the first setup', async () => {
     const r = await rig({ account: { apiKeySource: 'ANTHROPIC_API_KEY' } as AccountInfo });
     const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
-    await page.waitForText('Step 1 of 6: The agent name');
+    await waitForStep(page, 1, 'The agent name');
     expect(page.text()).toContain('The agent is paused.');
 
     page.byId('f-agent-name').value = 'Ada';
     await page.byId('f-agent-name').parent?.parent?.fire('submit');
-    await page.waitForText('Step 2 of 6: The model login');
+    await waitForStep(page, 2, 'The model login');
     expect(r.harness.config()?.config.agentName).toBe('Ada');
+
+    // The plan is the default choice. The user chooses the API key card instead.
+    expect(page.byId('login-subscription').checked).toBe(true);
+    expect(page.byId('login-subscription').type).toBe('radio');
+    page.byId('login-api-key').checked = true;
+    await page.byId('login-api-key').fire('change');
+    await until(() => page.find((n) => n.id === 'secret-credential-model-api-key') !== undefined, 'the API key field');
+    expect(r.harness.config()?.config.modelLogin).toBe('api_key');
+    expect(r.signIns).toHaveLength(0);
 
     const key = page.byId('secret-credential-model-api-key');
     key.value = API_KEY;
@@ -85,12 +101,12 @@ describe('the setup page script', () => {
     expect(page.text()).toContain('The agent is running.');
 
     await page.button('Continue').fire('click');
-    await page.waitForText('Step 3 of 6: Telegram');
+    await waitForStep(page, 3, 'Telegram');
     await page.button('Skip Telegram').fire('click');
-    await page.waitForText('Step 4 of 6: The limits and the models');
+    await waitForStep(page, 4, 'The limits and the models');
     page.byId('f-run-limits-max-steps').value = '20';
     await page.byId('f-run-limits-max-steps').parent?.parent?.fire('submit');
-    await page.waitForText('Step 5 of 6: The service');
+    await waitForStep(page, 5, 'The service');
     expect(r.harness.config()?.config.runLimits.maxSteps).toBe(20);
     await page.waitForText('What the install writes');
     expect(page.text()).toContain(r.launchAgentsDir);
@@ -98,7 +114,7 @@ describe('the setup page script', () => {
     // The last step shows the checks of the computer. Sleep is a choice until the user says nobody sits at it.
     r.commandAnswers.pmset = { code: 0, stdout: 'AC Power:\n sleep                10\n autorestart          1\n', stderr: '' };
     await page.button('Continue').fire('click');
-    await page.waitForText('Step 6 of 6: The computer');
+    await waitForStep(page, 6, 'The computer');
     await page.button('Check the computer again').fire('click');
     await until(() => page.byId('check-sleep').textContent.includes('not set'), 'the sleep check to be not set');
     expect(page.byId('check-service').textContent).toContain('problem');
@@ -142,14 +158,70 @@ describe('the setup page script', () => {
   });
 
   it('shows the error of an invalid agent.yaml, and the sign-in command for a Claude plan', async () => {
-    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
+    // No sign-in exists yet, so the page offers the sign-in and the terminal command.
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n', account: {} });
     writeFileSync(join(r.root, 'agent.yaml'), 'agent_name: Ada\nmodel_login: subscription\nmax_steps_typo: 3\n');
     await until(() => r.harness.configError() !== undefined, 'the harness to see the invalid file');
     const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
     await page.waitForText('agent.yaml is invalid.');
     expect(page.text()).toContain('Unknown key "max_steps_typo".');
     expect(page.text()).toContain('The harness keeps the last valid values');
-    expect(page.text()).toContain(`CLAUDE_CONFIG_DIR=${join(r.root, 'state', 'claude')} claude auth login`);
+    expect(page.text()).toContain(`CLAUDE_CONFIG_DIR=${join(r.root, 'state', 'claude')} ${terminalClaudeCommand()} auth login`);
+  });
+
+  it('starts the sign-in when the user chooses the plan, shows that it waits, and moves on when it ends well', async () => {
+    const account: AccountInfo = {};
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: api_key\n', account });
+    const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
+    await waitForStep(page, 2, 'The model login');
+    expect(page.byId('login-api-key').checked).toBe(true);
+
+    page.byId('login-subscription').checked = true;
+    await page.byId('login-subscription').fire('change');
+    await page.waitForText('Waiting for you to sign in');
+    expect(r.harness.config()?.config.modelLogin).toBe('subscription');
+    expect(r.signIns).toHaveLength(1);
+    expect(page.text()).toContain("Anthropic's sign-in page opened in the browser of this computer. Approve the sign-in there.");
+    expect(page.find((n) => n.tagName === 'SUMMARY' && n.textContent === 'Sign in from a terminal instead')).toBeDefined();
+    expect(page.button('Stop waiting')).toBeDefined();
+    expect(page.button('Continue').disabled).toBe(true);
+
+    // The user approves on Anthropic's page. The program ends well, and the page moves to the next step.
+    account.email = 'user@example.com';
+    account.subscriptionType = 'pro';
+    r.signIns[0]!.exit(0);
+    await waitForStep(page, 3, 'Telegram');
+    expect(page.text()).toContain('The login is ready.');
+    expect(r.harness.status().paused).toBe(false);
+    expect(page.text()).not.toContain('secret-oauth-value');
+  });
+
+  it('starts the sign-in with its button, and stops waiting when asked', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\n', account: {} });
+    const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
+    await waitForStep(page, 2, 'The model login');
+    // The plan is already chosen, so arriving at the step starts nothing.
+    expect(r.signIns).toHaveLength(0);
+    expect(page.text()).toContain("You sign in on Anthropic's own page, in the browser of this computer. The agent never sees your login.");
+
+    await page.button('Sign in with my Claude plan').fire('click');
+    await page.waitForText('Waiting for you to sign in');
+    expect(r.signIns).toHaveLength(1);
+    await page.button('Stop waiting').fire('click');
+    await page.waitForText('The sign-in was stopped.', 6000);
+    expect(r.signIns[0]!.signals).toEqual(['SIGTERM']);
+    expect(page.button('Sign in with my Claude plan')).toBeDefined();
+  });
+
+  it('does not start the sign-in when the user chooses the plan and the login is already ready', async () => {
+    // Claude Code already holds a sign-in with a plan, but agent.yaml asks for an API key that has no value.
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: api_key\n', account: { email: 'user@example.com', subscriptionType: 'pro' } });
+    const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
+    await waitForStep(page, 2, 'The model login');
+    page.byId('login-subscription').checked = true;
+    await page.byId('login-subscription').fire('change');
+    await page.waitForText('The login is ready.');
+    expect(r.signIns).toHaveLength(0);
   });
 });
 

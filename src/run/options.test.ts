@@ -258,7 +258,11 @@ describe('environment', () => {
     try {
       const env = buildRunOptions(input()).options.env ?? {};
       expect(Object.keys(env).sort()).toEqual(['CLAUDE_CONFIG_DIR', 'HOME', 'PATH', 'USER']);
-      const withKey = buildRunOptions(input({ modelApiKey: 'sk-1' })).options.env ?? {};
+      // With the default login, the Claude plan, a key given by mistake is not passed.
+      const planWithKey = buildRunOptions(input({ modelApiKey: 'sk-1' })).options.env ?? {};
+      expect(Object.keys(planWithKey).sort()).toEqual(['CLAUDE_CONFIG_DIR', 'HOME', 'PATH', 'USER']);
+      const apiKeyLogin = loaded({ config: { ...defaultConfig('Ada'), modelLogin: 'api_key' } });
+      const withKey = buildRunOptions(input({ loaded: apiKeyLogin, modelApiKey: 'sk-1' })).options.env ?? {};
       expect(Object.keys(withKey).sort()).toEqual(['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'HOME', 'PATH', 'USER']);
     } finally {
       delete process.env.MISSION_AGENT_TEST_LEAK;

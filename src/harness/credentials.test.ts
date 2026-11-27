@@ -32,7 +32,7 @@ function mission(id: string, status: Manifest['status'], tools: string[], trigge
 
 describe('required credentials (§A.5)', () => {
   it('holds the harness credentials, then those of the tools and triggers of active missions only', () => {
-    const config = { ...defaultConfig('Ada'), telegramUserId: 1 };
+    const config = { ...defaultConfig('Ada'), modelLogin: 'api_key' as const, telegramUserId: 1 };
     const ids = requiredCredentialIds(
       config,
       [mission('m_a', 'active', ['tool:gmail'], ['trigger:email.received']), mission('m_b', 'frozen', [], ['trigger:other.thing'])],
@@ -43,6 +43,8 @@ describe('required credentials (§A.5)', () => {
 
   it('has no model credential with the subscription login and no bot token without Telegram', () => {
     expect(requiredCredentialIds({ ...defaultConfig('Ada'), modelLogin: 'subscription' }, [], sources)).toEqual([]);
+    // The default login is the Claude plan, so the default configuration needs no model credential.
+    expect(requiredCredentialIds(defaultConfig('Ada'), [], sources)).toEqual([]);
   });
 
   it('writes one message per credential with the command, never a value', () => {

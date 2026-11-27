@@ -103,7 +103,8 @@ const USAGE = `Usage: mission-agent <command> [options]
 Commands:
   start                       Run the harness in the foreground until Ctrl+C.
   init --name <agent name>    Create the root folder and a first agent.yaml.
-       [--surface terminal|telegram] [--telegram-user-id <id>] [--login api_key|subscription]
+       [--surface terminal|telegram] [--telegram-user-id <id>] [--login subscription|api_key]
+                              --login is the model login. Default: subscription, your own Claude plan.
   chat                        Chat with the running harness in this terminal.
   status                      Show whether the harness runs, whether it is paused, and the missions.
   secret set <id>             Store a credential. The value is asked with hidden input.
@@ -391,9 +392,9 @@ function initCommand(paths: Paths, values: Values, rootFlag: string, out: (line:
   if (surface !== 'terminal' && surface !== 'telegram') {
     throw new CliError(`--surface must be terminal or telegram, not "${surface}".`, 2);
   }
-  const login = values.login ?? 'api_key';
+  const login = values.login ?? 'subscription';
   if (login !== 'api_key' && login !== 'subscription') {
-    throw new CliError(`--login must be api_key or subscription, not "${login}".`, 2);
+    throw new CliError(`--login must be subscription or api_key, not "${login}".`, 2);
   }
   let telegramUserId: number | undefined;
   const rawUser = values['telegram-user-id'];
@@ -559,9 +560,10 @@ async function secretCommand(paths: Paths, positionals: string[], io: CliIo, out
 // ---------------------------------------------------------------- login-help
 
 function loginHelpCommand(paths: Paths, rootFlag: string, out: (line: string) => void): number {
-  out('To use your own Claude plan, set "model_login: subscription" in agent.yaml.');
-  out(`${loginHelp('subscription', paths.sdkConfigDir)}`);
-  out('The sign-in belongs to this agent only. Run the command again when the sign-in ends.');
+  out('Your own Claude plan is the default login: "model_login: subscription" in agent.yaml.');
+  out('The setup page can start the sign-in for you. It opens Anthropic\'s sign-in page in the browser.');
+  out(`Or, in a terminal: ${loginHelp('subscription', paths.sdkConfigDir)}`);
+  out('The sign-in belongs to this agent only. Sign in again when the sign-in ends.');
   out('');
   out('To use an API key from the Claude Console instead, set "model_login: api_key" in agent.yaml.');
   out(`Then store the key: mission-agent secret set ${MODEL_API_KEY}${rootFlag}`);

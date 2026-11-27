@@ -47,7 +47,7 @@ describe('loadConfig', () => {
     expect(config).toEqual(defaultConfig('Ada'));
     expect(config).toMatchObject({
       defaultSurface: 'terminal',
-      modelLogin: 'api_key',
+      modelLogin: 'subscription',
       defaultModel: 'claude-opus-5-5',
       defaultEffort: 'high',
       triageModel: 'claude-haiku-5-5',
@@ -162,7 +162,7 @@ describe('loadConfig', () => {
         'run_limits.max_cost_usd must be more than 0.',
         'triage_switch_confidence must be at most 1.',
         'max_note_bytes must be a number, but it is "lots".',
-        'model_login must be one of "api_key", "subscription", but it is "password".',
+        'model_login must be one of "subscription", "api_key", but it is "password".',
       ]),
     );
     expect(problems).toHaveLength(6);

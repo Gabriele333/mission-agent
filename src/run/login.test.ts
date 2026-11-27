@@ -9,6 +9,7 @@ import { MODEL_API_KEY } from '../secrets/index.js';
 import type { AgentConfig, LoadedConfig } from '../types.js';
 import { checkModelLogin, createModelCaller, ModelCallError, type ModelLoginDeps } from './login.js';
 import { errorAssistantMsg, fakeQuery, initMsg, resultMsg, type Script } from './test-helpers.js';
+import { terminalClaudeCommand } from './sign-in.js';
 
 let tmp: string;
 let paths: Paths;
@@ -49,7 +50,7 @@ describe('checkModelLogin', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toMatch(/^Not logged in: /);
-      expect(r.reason).toContain(`CLAUDE_CONFIG_DIR="${paths.sdkConfigDir}" claude auth login`);
+      expect(r.reason).toContain(`CLAUDE_CONFIG_DIR="${paths.sdkConfigDir}" ${terminalClaudeCommand()} auth login`);
     }
   });
 
@@ -57,7 +58,7 @@ describe('checkModelLogin', () => {
     const { d } = deps('subscription', undefined, [nothing], { tokenSource: 'none' });
     d.sdkConfigDir = null;
     const r = await checkModelLogin(d);
-    expect(r.ok ? '' : r.reason).toContain('Sign in to Claude Code with: claude auth login');
+    expect(r.ok ? '' : r.reason).toContain(`Sign in to Claude Code with: ${terminalClaudeCommand()} auth login`);
   });
 
   it('does not start Claude Code when the model key has no value', async () => {

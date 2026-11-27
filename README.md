@@ -44,9 +44,9 @@ Not built yet:
 - [Design](docs/design.md): how the harness works, and why.
 - [Security](SECURITY.md): how to report a problem, and what the harness does not protect against.
 
-You can use an API key from the Claude Console, or your own Claude plan.
+You can use your own Claude plan, which is the default, or an API key from the Claude Console.
 
-With a plan, you sign in yourself, with Anthropic's own `claude auth login` command. The harness shows no sign-in screen. It never asks for the login of your plan, never reads it and never stores it. It sends no request through another server or another account. Claude Code, which comes with the Claude Agent SDK, runs on your computer and talks to Anthropic under your own plan and its limits.
+With a plan, you sign in on Anthropic's own page. The setup page starts Anthropic's own sign-in program, and that program opens the page in your browser. You can also run Anthropic's `claude auth login` command in a terminal instead. The harness shows no sign-in screen of its own. It reads nothing that the sign-in program prints and passes nothing to it. It never asks for the login of your plan, never reads it and never stores it. It sends no request through another server or another account. Claude Code, which comes with the Claude Agent SDK, runs on your computer and talks to Anthropic under your own plan and its limits. You need no other install of Claude Code.
 
 Your use of Claude through this harness is under your own agreement with Anthropic. Anthropic decides what a plan may be used for, and it has changed those rules before: read its terms for the login you choose. Anthropic has not reviewed this project, and nothing here is a statement by Anthropic.
 

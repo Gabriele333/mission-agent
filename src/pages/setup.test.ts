@@ -2,6 +2,7 @@ import type { AccountInfo } from '@anthropic-ai/claude-agent-sdk';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { terminalClaudeCommand } from '../run/index.js';
 import { MODEL_API_KEY, TELEGRAM_BOT_TOKEN } from '../secrets/index.js';
 import { textUpdate, USER } from '../surfaces/telegram/test-helpers.js';
 import { SYS_GENERAL, SYS_MISSION_ADMIN } from '../types.js';
@@ -34,7 +35,15 @@ type State = {
     generalErrors: string[];
   };
   texts: { corePrompt: string; corePromptIsDefault: boolean; noteParagraph: string };
-  login: { modelLogin: string | null; state: string; reason: string; apiKeyPresent: boolean; signInCommand: string };
+  login: {
+    modelLogin: string | null;
+    state: string;
+    reason: string;
+    apiKeyPresent: boolean;
+    signInCommand: string;
+    signIn: { state: string; reason?: string; startedAt?: string; expiresAt?: string };
+    signInAvailable: boolean;
+  };
   telegram: { tokenPresent: boolean; userId: number | null; surfaceRunning: boolean; pairing: { state: string; code?: string; userId?: number; reason?: string } };
   credentials: { id: string; present: boolean }[];
 };
@@ -53,7 +62,7 @@ async function saveConfig(r: PagesRig, values: Record<string, unknown>) {
 const agentFile = (r: PagesRig) => readFileSync(join(r.root, 'agent.yaml'), 'utf8');
 
 describe('first setup (§5.1)', () => {
-  it('saves the name, then an API key, and the harness ends its pause by itself', async () => {
+  it('saves the name with the default login, a Claude plan, then an API key, and the harness ends its pause by itself', async () => {
     const r = await rig({ account: { apiKeySource: 'ANTHROPIC_API_KEY' } as AccountInfo });
     let s = await state(r);
     expect(s.config.exists).toBe(false);
@@ -64,11 +73,20 @@ describe('first setup (§5.1)', () => {
     // Step 1. The name is saved at once, with the defaults of §A.1 for every other key.
     expect((await saveConfig(r, { agent_name: 'Ada' })).status).toBe(200);
     expect(agentFile(r)).toContain('agent_name: Ada');
-    expect(agentFile(r)).toContain('model_login: api_key');
+    expect(agentFile(r)).toContain('model_login: subscription');
     s = await state(r);
     expect(s.agentName).toBe('Ada');
+    // The default login is a Claude plan with no sign-in yet, so the harness stays paused and says why.
     expect(s.harness).toMatchObject({ paused: true, blockerKind: 'login' });
-    expect(s.login).toMatchObject({ state: 'not_ready', apiKeyPresent: false });
+    expect(s.harness.pauseReason).toContain('Claude Code is not signed in with a Claude plan for this agent');
+    expect(s.login).toMatchObject({ modelLogin: 'subscription', state: 'not_ready', apiKeyPresent: false });
+
+    // The user chooses an API key instead.
+    expect((await saveConfig(r, { model_login: 'api_key' })).status).toBe(200);
+    expect(agentFile(r)).toContain('model_login: api_key');
+    s = await state(r);
+    expect(s.harness).toMatchObject({ paused: true, blockerKind: 'login' });
+    expect(s.login).toMatchObject({ modelLogin: 'api_key', state: 'not_ready', apiKeyPresent: false });
 
     // Step 2. The key goes to the secret store, and the answer says only that a value is present.
     const res = await r.post('/api/setup/secret', { id: MODEL_API_KEY, value: API_KEY });
@@ -93,7 +111,7 @@ describe('first setup (§5.1)', () => {
     const r = await rig({ agentYaml: 'agent_name: Ada\n', account });
     expect((await saveConfig(r, { model_login: 'subscription' })).status).toBe(200);
     let s = await state(r);
-    expect(s.login.signInCommand).toBe(`CLAUDE_CONFIG_DIR=${join(r.root, 'state', 'claude')} claude auth login`);
+    expect(s.login.signInCommand).toBe(`CLAUDE_CONFIG_DIR=${join(r.root, 'state', 'claude')} ${terminalClaudeCommand()} auth login`);
     expect(s.login.state).toBe('not_ready');
     expect(r.harness.status().paused).toBe(true);
 
@@ -111,7 +129,9 @@ describe('first setup (§5.1)', () => {
 
   it('quotes a root path with a space or a quote in the sign-in command', async () => {
     const { signInCommand } = await import('./setup-routes.js');
-    expect(signInCommand("/Users/a b/it's/state/claude")).toBe(`CLAUDE_CONFIG_DIR='/Users/a b/it'\\''s/state/claude' claude auth login`);
+    expect(signInCommand("/Users/a b/it's/state/claude", 'claude')).toBe(`CLAUDE_CONFIG_DIR='/Users/a b/it'\\''s/state/claude' claude auth login`);
+    // Without claude on the PATH, the command names the program of the SDK by its path.
+    expect(signInCommand('/x/state/claude', '/app/node_modules/sdk/claude')).toBe('CLAUDE_CONFIG_DIR=/x/state/claude /app/node_modules/sdk/claude auth login');
   });
 
   it('keeps each answer, so a new page and a new harness continue where the user stopped', async () => {
@@ -121,7 +141,8 @@ describe('first setup (§5.1)', () => {
     const root = first.root;
     await first.harness.stop();
 
-    const second = await rig({ before: (r) => writeFileSync(join(r, 'agent.yaml'), readFileSync(join(root, 'agent.yaml'))) });
+    // No sign-in with a Claude plan exists yet, so the login is still what keeps the pause.
+    const second = await rig({ account: {}, before: (r) => writeFileSync(join(r, 'agent.yaml'), readFileSync(join(root, 'agent.yaml'))) });
     const s = await state(second);
     expect(s.agentName).toBe('Ada');
     expect(s.config.values['run_limits.max_steps']).toBe(12);
@@ -133,6 +154,88 @@ describe('first setup (§5.1)', () => {
     const r = await rig();
     const res = await r.post('/api/setup/login/check');
     expect(res.status).toBe(409);
+  });
+});
+
+describe('the sign-in with a Claude plan (§A.5, §5.1 step 2)', () => {
+  it("starts Anthropic's sign-in program once, and ends the pause when it ends well", async () => {
+    const account: AccountInfo = {};
+    const r = await rig({ agentYaml: 'agent_name: Ada\n', account });
+    let s = await state(r);
+    expect(s.login).toMatchObject({ modelLogin: 'subscription', state: 'not_ready', signIn: { state: 'idle' }, signInAvailable: true });
+    expect(r.harness.status().paused).toBe(true);
+
+    const res = await r.post('/api/setup/login/start');
+    expect(res.status).toBe(200);
+    const started = await r.json<{ ok: boolean; signIn: { state: string } }>(res);
+    expect(started).toMatchObject({ ok: true, signIn: { state: 'waiting' } });
+    expect(r.signIns).toHaveLength(1);
+    const child = r.signIns[0]!;
+    expect(child.command).toBe('/fake/claude');
+    expect(child.args).toEqual(['auth', 'login', '--claudeai']);
+    expect(child.options).toEqual({
+      env: { PATH: '/usr/local/bin:/bin:/usr/bin', HOME: '/Users/ada', USER: 'ada', CLAUDE_CONFIG_DIR: join(r.root, 'state', 'claude') },
+      stdio: ['ignore', 'ignore', 'ignore'],
+      shell: false,
+    });
+
+    // A second press starts nothing new.
+    expect(await r.json(await r.post('/api/setup/login/start'))).toMatchObject({ signIn: { state: 'waiting' } });
+    expect(r.signIns).toHaveLength(1);
+    expect(await r.json(await r.get('/api/setup/login/sign-in'))).toMatchObject({ ok: true, signIn: { state: 'waiting' } });
+
+    // The user approves on Anthropic's page. Claude Code then holds a sign-in, and the program ends well.
+    account.email = 'user@example.com';
+    account.subscriptionType = 'pro';
+    child.exit(0);
+    await until(async () => (await state(r)).login.signIn.state === 'done', 'the end of the sign-in');
+    expect(r.harness.status().paused).toBe(false);
+    s = await state(r);
+    expect(s.login.state).toBe('ready');
+    expect(r.logs.join('\n')).not.toContain('secret-oauth-value');
+  });
+
+  it('stops the program when the user stops waiting, and when the harness stops', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\n', account: {} });
+    await r.post('/api/setup/login/start');
+    const cancel = await r.json(await r.post('/api/setup/login/cancel'));
+    expect(cancel).toMatchObject({ ok: true, signIn: { state: 'cancelled' } });
+    expect(r.signIns[0]!.signals).toEqual(['SIGTERM']);
+    expect(r.harness.status().paused).toBe(true);
+
+    await r.post('/api/setup/login/start');
+    expect(r.signIns).toHaveLength(2);
+    await r.harness.stop();
+    expect(r.signIns[1]!.signals).toEqual(['SIGTERM']);
+  });
+
+  it('reports a program that ended without a sign-in, and one that ran out of time', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\n', account: {}, signInTimeoutMs: 200 });
+    await r.post('/api/setup/login/start');
+    r.signIns[0]!.exit(1);
+    await until(async () => (await state(r)).login.signIn.state === 'failed', 'the failed sign-in');
+    expect((await state(r)).login.signIn.reason).toContain('exit code 1');
+
+    await r.post('/api/setup/login/start');
+    await until(async () => (await state(r)).login.signIn.state === 'failed', 'the end of the time');
+    expect((await state(r)).login.signIn.reason).toContain('No sign-in was finished');
+    expect(r.signIns[1]!.signals).toEqual(['SIGTERM']);
+  });
+
+  it('says so when no sign-in program is found, and starts nothing', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\n', account: {}, signInProgram: null });
+    expect((await state(r)).login.signInAvailable).toBe(false);
+    const started = await r.json<{ signIn: { state: string; reason: string } }>(await r.post('/api/setup/login/start'));
+    expect(started.signIn).toMatchObject({ state: 'failed', reason: expect.stringContaining('Sign in from a terminal instead') });
+    expect(r.signIns).toHaveLength(0);
+  });
+
+  it('refuses to start before the name is saved, and with the api_key login', async () => {
+    const empty = await rig();
+    expect((await empty.post('/api/setup/login/start')).status).toBe(409);
+    const key = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: api_key\n' });
+    expect((await key.post('/api/setup/login/start')).status).toBe(409);
+    expect(key.signIns).toHaveLength(0);
   });
 });
 
@@ -225,7 +328,11 @@ describe('changes after setup (§5.2)', () => {
 
 describe('credentials (§5.2, §J.3)', () => {
   it('lists each required credential with whether a value is present, and sets and deletes one', async () => {
-    const r = await rig({ agentYaml: 'agent_name: Ada\n' });
+    // With the default login, a Claude plan, no credential is required.
+    const plan = await rig({ agentYaml: 'agent_name: Ada\n' });
+    expect((await state(plan)).credentials).toEqual([]);
+
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: api_key\n' });
     let s = await state(r);
     expect(s.credentials).toEqual([{ id: MODEL_API_KEY, present: false }]);
     await r.post('/api/setup/secret', { id: MODEL_API_KEY, value: API_KEY });

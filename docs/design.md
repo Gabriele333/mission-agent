@@ -299,7 +299,7 @@ These parameters belong to the harness and apply to the whole agent. The user se
 | Agent name                                 | Required. The user sets it at setup                   | §A.2, §J     |
 | Default surface                            | Telegram                                              | §F.1         |
 | User's Telegram account                    | Required to use Telegram                              | §F.1         |
-| Model login                                | `api_key`. The other value is `subscription`          | §A.5         |
+| Model login                                | `subscription`. The other value is `api_key`          | §A.5         |
 | Longest line in a memory index             | 200 characters                                        | §C, §E.2.1   |
 | Largest note file                          | 4KB                                                   | §C, §E.2.1   |
 | Core memory size                           | 50 lines of at most 200 characters                    | §C.2, §I.2   |
@@ -514,16 +514,20 @@ Every other tool, such as `tool:gmail` in the example of §A.4, is added by a de
 
 **Model login.** The "Model login" parameter (§A.1) has two values:
 
-- With `api_key`, the default, the model credential is `credential:model.api_key`, a key from the Claude Console. The harness stores it in the Keychain.
-- With `subscription`, the harness has no model credential. The user signs in to Claude Code with their own Claude plan, and the runs use that sign-in. They draw from the usage limits of the user's plan.
+- With `subscription`, the default, the harness has no model credential. The user signs in to Claude Code with their own Claude plan, and the runs use that sign-in. They draw from the usage limits of the user's plan.
+- With `api_key`, the model credential is `credential:model.api_key`, a key from the Claude Console. The harness stores it in the Keychain.
 
-**The sign-in with a Claude plan.** The harness shows no sign-in screen of its own. It never asks for the plan's token, never reads it and never stores it. Claude Code keeps it. The harness passes on no server address, no key and no token from the shell that started it, so a run's requests go from Claude Code on the user's computer to Anthropic, under the user's own plan. No request goes through another server or another account. The user signs in with Anthropic's own command, in a terminal. The sign-in belongs to one configuration folder (§3.3), so the user signs in once for the harness's folder:
+**The sign-in with a Claude plan.** The harness shows no sign-in screen of its own. It never asks for the plan's token, never reads it and never stores it. Claude Code keeps it. The harness passes on no server address, no key and no token from the shell that started it, so a run's requests go from Claude Code on the user's computer to Anthropic, under the user's own plan. No request goes through another server or another account.
+
+The setup page starts the sign-in when the user chooses the plan ([chapter 5](#5-setup-page)). The harness then starts Anthropic's own sign-in program, unmodified, as `claude auth login --claudeai`. It is the Claude Code program that comes with the SDK, the same one that runs the agent. That program opens Anthropic's sign-in page in the browser of the computer. The user approves there, and Claude Code keeps the sign-in. The harness reads nothing that the program prints, and passes nothing to it. Its input and output are closed. The program gets the same fixed environment as a run (see "How a value is read" below), with `/usr/bin` on its PATH so that it can open the browser. The harness only watches whether the program ended well, and then checks the login. A sign-in that is not finished after 10 minutes is stopped. One sign-in runs at a time, and it stops when the harness stops.
+
+The other way is Anthropic's own command, in a terminal. The sign-in belongs to one configuration folder (§3.3), so the user signs in once for the harness's folder:
 
 ```
 CLAUDE_CONFIG_DIR="<root>/state/claude" claude auth login
 ```
 
-The setup page shows this command with the real path, and does not run it ([chapter 5](#5-setup-page)). A sign-in ends after some time. The harness then tells the user to run the command again.
+The setup page shows this command with the real path, and does not run it. When `claude` is not on the PATH, the command names the Claude Code program of the SDK by its full path, so no other install is needed. A sign-in ends after some time. The harness then pauses and tells the user to sign in again.
 
 Anthropic's rules, as read on 25 November 2026, do not let a product offer a Claude plan login of its own, or collect, store or pass on a plan's credentials. They let a user sign in to the unmodified Claude Code program with their own plan. The harness runs that unmodified program through the SDK, and the sign-in happens in Anthropic's own flow. Anthropic has not confirmed that this is enough for a published harness.
 
@@ -1194,7 +1198,7 @@ The setup page is a local web page served by the harness (§J). The user sets up
 The user installs the harness program and runs its `setup` command. No agent configuration file exists yet, so the harness starts paused (§H) and the page opens. The page asks for six things, in this order:
 
 1. The agent name (§A.2). It is required.
-2. The model login (§A.5): an API key, or the user's own Claude plan. The page stores an API key in the Keychain. For a plan, the page shows Anthropic's sign-in command, and the user runs it in a terminal. One of the two is required.
+2. The model login (§A.5): the user's own Claude plan, which is the default, or an API key. For a plan, the page starts Anthropic's own sign-in program, which opens Anthropic's sign-in page in the browser. The page waits until the sign-in ends, then moves on. It also shows Anthropic's sign-in command for a terminal, as the other way. The page stores an API key in the Keychain. One of the two is required.
 3. Telegram, which the user can skip. The user creates a bot in Telegram and enters its token, which the page stores in the Keychain. The page then shows a code. The user sends the code to the bot, and the harness records the sender as the user's Telegram account (§F.1). Without Telegram, the default surface is the terminal.
 4. The limits and the models. The page shows the defaults of §A.1, and the user can keep them.
 5. The service. The page installs the harness as a service of the user's account, so that it starts at login (§H). When the install script installed it already (chapter 7.2), the page shows it as installed.

@@ -5,7 +5,7 @@
  *   default_surface             telegram or terminal. Default: telegram when telegram_user_id is set,
  *                               terminal otherwise.
  *   telegram_user_id            The numeric id of the user's Telegram account. Unset when Telegram is not used.
- *   model_login                 api_key (default) or subscription.
+ *   model_login                 subscription (default), the user's own Claude plan, or api_key.
  *   max_index_line_chars        Longest line in a memory index. Default 200.
  *   max_note_bytes              Largest note file, in bytes. Default 4096.
  *   core_memory_max_lines       Lines kept in core memory. Default 50.
@@ -40,7 +40,7 @@ export const agentFileSchema = z.strictObject({
   agent_name: text,
   default_surface: z.enum(['telegram', 'terminal']).optional(),
   telegram_user_id: count.optional(),
-  model_login: z.enum(['api_key', 'subscription']).optional(),
+  model_login: z.enum(['subscription', 'api_key']).optional(),
   max_index_line_chars: count.optional(),
   max_note_bytes: count.optional(),
   core_memory_max_lines: count.optional(),
@@ -133,7 +133,7 @@ export const KEY_COMMENTS: Record<keyof AgentFile, string> = {
   agent_name: 'Free text. Replaces {agent name} in the core text.',
   default_surface: 'telegram or terminal.',
   telegram_user_id: "The numeric id of the user's Telegram account.",
-  model_login: 'api_key or subscription.',
+  model_login: 'subscription (your own Claude plan) or api_key.',
   max_index_line_chars: 'Longest line in a memory index, in characters.',
   max_note_bytes: 'Largest note file, in bytes.',
   core_memory_max_lines: 'Lines kept in core memory.',

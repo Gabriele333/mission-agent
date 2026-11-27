@@ -7,7 +7,9 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
+import { EventEmitter } from 'node:events';
 import type { QueryFn, RunQuery } from './sdk.js';
+import type { SignInChild, SignInSpawn, SignInSpawnOptions } from './sign-in.js';
 
 /** A fake of the SDK's `query()` for unit tests. Each call runs the next script. */
 
@@ -204,4 +206,63 @@ export function resultMsg(f: ResultFields = {}): SDKMessage {
     },
     session_id: f.sessionId ?? 's1',
   } as unknown as SDKMessage;
+}
+
+// ---------------------------------------------------------------- a fake of the sign-in program
+
+export interface FakeSignInChild {
+  command: string;
+  args: readonly string[];
+  options: SignInSpawnOptions;
+  signals: (NodeJS.Signals | undefined)[];
+  /** Ends the fake program with this exit code. */
+  exit(code: number | null, signal?: NodeJS.Signals | null): void;
+  /** Reports that the program could not start. */
+  fail(err: Error): void;
+  /** How many listeners the sign-in put on the fake's output streams. It must be none. */
+  outputListeners(): number;
+}
+
+/** A spawner that starts nothing and records each call. A killed fake ends at once, as the real program does on SIGTERM. */
+export function fakeSignInSpawn(): { spawn: SignInSpawn; children: FakeSignInChild[] } {
+  const children: FakeSignInChild[] = [];
+  const spawn: SignInSpawn = (command, args, options) => {
+    const events = new EventEmitter();
+    // Streams that a real program with open pipes would have. They hold a value of a sign-in.
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    let ended = false;
+    const child: FakeSignInChild & SignInChild & { stdout: EventEmitter; stderr: EventEmitter } = {
+      command,
+      args,
+      options,
+      signals: [],
+      stdout,
+      stderr,
+      exit(code, signal = null) {
+        if (ended) return;
+        ended = true;
+        stdout.emit('data', 'Paste code here if prompted > secret-oauth-value');
+        events.emit('exit', code, signal);
+      },
+      fail(err) {
+        if (ended) return;
+        ended = true;
+        events.emit('error', err);
+      },
+      outputListeners: () => stdout.listenerCount('data') + stderr.listenerCount('data'),
+      once(event: string, listener: (...a: never[]) => void) {
+        events.once(event, listener as (...a: unknown[]) => void);
+        return child;
+      },
+      kill(signal) {
+        child.signals.push(signal);
+        queueMicrotask(() => child.exit(null, signal ?? 'SIGTERM'));
+        return true;
+      },
+    } as FakeSignInChild & SignInChild & { stdout: EventEmitter; stderr: EventEmitter };
+    children.push(child);
+    return child;
+  };
+  return { spawn, children };
 }

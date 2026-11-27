@@ -26,6 +26,7 @@ import type {
 } from '../types.js';
 import { createRunEngine, type RunEngineDeps } from './engine.js';
 import { isNotLoggedIn } from './login.js';
+import { terminalClaudeCommand } from './sign-in.js';
 import {
   errorAssistantMsg,
   fakeQuery,
@@ -340,7 +341,7 @@ describe('environment and login', () => {
     const r = await t.engine.run(chat());
     expect(r.status).toBe('failed');
     expect(r.error).toContain('Not logged in: Claude Code is not signed in');
-    expect(r.error).toContain(`CLAUDE_CONFIG_DIR="${paths.sdkConfigDir}" claude auth login`);
+    expect(r.error).toContain(`CLAUDE_CONFIG_DIR="${paths.sdkConfigDir}" ${terminalClaudeCommand()} auth login`);
     expect(r.finalText).toBe('');
     expect(r.retried).toBe(false);
     expect(t.calls).toHaveLength(1);

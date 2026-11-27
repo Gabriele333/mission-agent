@@ -6,6 +6,7 @@ import type { AgentConfig, Effort, LoadedConfig, RunResult } from '../types.js';
 import { MessageCollector, errorText } from './messages.js';
 import { buildRunEnv, hostEnvFromProcess, type HostEnv } from './options.js';
 import { sdkQuery, type QueryFn } from './sdk.js';
+import { terminalClaudeCommand } from './sign-in.js';
 
 /** The model login (§A.5 "Model login", "A missing or refused credential") and the plain model call of §B.3. */
 
@@ -29,12 +30,19 @@ export function configDirFor(paths: Paths, option: string | null | undefined): s
   return option === undefined ? paths.sdkConfigDir : option;
 }
 
-/** What the user must do to sign in. */
-export function loginHelp(login: AgentConfig['modelLogin'], sdkConfigDir: string | null): string {
+/**
+ * What the user must do to sign in. The command names `claude` when it is on the PATH, and
+ * otherwise the Claude Code program that comes with the SDK, so no other install is needed.
+ */
+export function loginHelp(
+  login: AgentConfig['modelLogin'],
+  sdkConfigDir: string | null,
+  program: string = terminalClaudeCommand(),
+): string {
   if (login === 'api_key') return `Enter a key from the Claude Console with: mission-agent secret set ${MODEL_API_KEY}`;
   return sdkConfigDir === null
-    ? 'Sign in to Claude Code with: claude auth login'
-    : `Sign in to Claude Code for this agent with: CLAUDE_CONFIG_DIR="${sdkConfigDir}" claude auth login`;
+    ? `Sign in to Claude Code with: ${program} auth login`
+    : `Sign in to Claude Code for this agent with: CLAUDE_CONFIG_DIR="${sdkConfigDir}" ${program} auth login`;
 }
 
 /**

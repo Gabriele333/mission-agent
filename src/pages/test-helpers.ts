@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHarness, type Harness } from '../harness/index.js';
 import { fakeSurface, scriptedQuery, simpleAnswers, TELEGRAM, type FakeSurface } from '../harness/test-helpers.js';
+import { fakeSignInSpawn, type FakeSignInChild } from '../run/test-helpers.js';
 import { createMemorySecretStore } from '../secrets/index.js';
 import { readServerFile } from '../server/index.js';
 import type { LaunchctlResult } from '../service/index.js';
@@ -25,6 +26,8 @@ export interface PagesRig {
   /** What the fake launchctl answers to `print`. */
   printAnswer: LaunchctlResult;
   launchAgentsDir: string;
+  /** Each sign-in program that the harness started. None is real. */
+  signIns: FakeSignInChild[];
   /**
    * What the fake `defaults`, `pmset`, `sysadminctl`, `fdesetup` and `git` answer, by the name of
    * the program. The checks of the computer never read the real settings in a test.
@@ -48,6 +51,9 @@ export interface RigOptions {
   /** Runs before the harness starts, with the root folder. */
   before?: (root: string) => void;
   pairTimeoutMs?: number;
+  /** The sign-in program the harness finds. Null: none is found. Default: a fake path. */
+  signInProgram?: string | null;
+  signInTimeoutMs?: number;
 }
 
 export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
@@ -61,6 +67,8 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
   const surface = fakeSurface(TELEGRAM, true);
   const logs: string[] = [];
   const { queryFn } = scriptedQuery(simpleAnswers(), options.account);
+  const signIn = fakeSignInSpawn();
+  const program = options.signInProgram === undefined ? '/fake/claude' : options.signInProgram;
   const harness = createHarness({
     root,
     secretStore: secrets,
@@ -70,6 +78,12 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
     configDebounceMs: 50,
     createTelegramSurface: () => surface,
     telegramFetch: telegram.fetchFn,
+    signIn: {
+      spawn: signIn.spawn,
+      program: () => program ?? undefined,
+      hostEnv: () => ({ PATH: '/usr/local/bin:/bin', HOME: '/Users/ada', USER: 'ada' }),
+      ...(options.signInTimeoutMs !== undefined ? { timeoutMs: options.signInTimeoutMs } : {}),
+    },
   });
 
   const cliPath = join(tmp, 'dist', 'cli.js');
@@ -88,6 +102,7 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
     launchctlCalls: [] as string[][],
     printAnswer: { code: 113, stdout: '', stderr: 'Could not find service' } as LaunchctlResult,
     launchAgentsDir,
+    signIns: signIn.children,
     commandAnswers: {
       defaults: { code: 0, stdout: 'ada\n', stderr: '' },
       pmset: { code: 0, stdout: 'AC Power:\n sleep                0\n autorestart          1\n', stderr: '' },

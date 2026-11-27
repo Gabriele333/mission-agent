@@ -24,14 +24,14 @@ After the first setup, the page shows the same list in its part named "Computer"
 mission-agent init --name Ada --root ~/agents/ada
 ```
 
-This writes `agent.yaml` in the root folder. Add `--login subscription` to use your Claude plan. Then edit the file. Each key has a comment above it.
+This writes `agent.yaml` in the root folder. The model login is your own Claude plan. Add `--login api_key` to use an API key instead. Then edit the file. Each key has a comment above it.
 
 The keys you are most likely to change:
 
 | Key | Meaning | Default |
 | --- | --- | --- |
 | `agent_name` | The name of the agent. Required. | none |
-| `model_login` | `api_key` or `subscription`. | `api_key` |
+| `model_login` | `subscription` (your own Claude plan) or `api_key`. | `subscription` |
 | `default_surface` | Where the agent writes to you: `terminal` or `telegram`. | `terminal`, or `telegram` when Telegram is set |
 | `default_model` | The model of a mission that sets none. | `claude-opus-5-5` |
 | `max_cost_per_day_usd` | The cost limit per day, for the whole agent. | 20 |
@@ -44,21 +44,23 @@ Every mission also reads one core text. You change it in the setup page, or in t
 
 ## Model login
 
-Choose one.
+Choose one. Your own Claude plan is the default.
 
-With an API key, store the key. The value is asked with hidden input.
+With your own Claude plan, sign in on the setup page. Choose "My own Claude plan", or press "Sign in with my Claude plan". The page starts Anthropic's own sign-in program, which opens Anthropic's sign-in page in your browser. You approve there. The page waits, and moves on when the sign-in is done. The harness shows no sign-in screen of its own. It reads nothing that the sign-in program prints, and passes nothing to it. It never asks for the token of your plan, never reads it and never stores it.
 
-```
-mission-agent secret set credential:model.api_key --root ~/agents/ada
-```
-
-With your own Claude plan, set `model_login: subscription`. Then run the command that this prints:
+You can also sign in from a terminal. The setup page shows the command under "Sign in from a terminal instead". This prints it too:
 
 ```
 mission-agent login-help --root ~/agents/ada
 ```
 
-It is Anthropic's own sign-in command of Claude Code, for this agent's folder. The harness shows no sign-in screen. It never asks for the token of your plan, never reads it and never stores it.
+It is Anthropic's own sign-in command of Claude Code, for this agent's folder. Claude Code comes with the program, so you need no other install.
+
+With an API key, set `model_login: api_key`, then store the key. The value is asked with hidden input.
+
+```
+mission-agent secret set credential:model.api_key --root ~/agents/ada
+```
 
 Nothing is sent through anyone else. Claude Code runs on your computer and talks to Anthropic with your own sign-in. The runs draw from the limits of your own plan. The author of this program has no part in that connection, and receives nothing from it.
 

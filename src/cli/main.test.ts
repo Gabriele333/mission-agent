@@ -99,8 +99,11 @@ describe('init', () => {
     const r = await run(['init', '--name', 'Ada', '--root', root]);
     expect(r.code).toBe(0);
     expect(r.out).toContain(`Created ${join(root, 'agent.yaml')} for the agent "Ada".`);
-    expect(r.out).toContain(`mission-agent secret set ${MODEL_API_KEY} --root "${root}"`);
+    // The default model login is the user's own Claude plan.
+    expect(r.out).toContain(`CLAUDE_CONFIG_DIR="${join(root, 'state', 'claude')}"`);
+    expect(r.out).not.toContain(`secret set ${MODEL_API_KEY}`);
     expect(readFileSync(join(root, 'agent.yaml'), 'utf8')).toContain('agent_name: Ada');
+    expect(readFileSync(join(root, 'agent.yaml'), 'utf8')).toContain('model_login: subscription');
     expect(existsSync(join(root, 'missions', 'sys-general', 'manifest.yaml'))).toBe(true);
 
     const again = await run(['init', '--name', 'Bob', '--root', root]);
@@ -118,6 +121,16 @@ describe('init', () => {
     expect(ok.code).toBe(0);
     expect(ok.out).toContain(`mission-agent secret set ${TELEGRAM_BOT_TOKEN}`);
     expect(ok.out).toContain('CLAUDE_CONFIG_DIR');
+  });
+
+  it('writes the api_key login when asked, and says how to store the key', async () => {
+    const r = await run(['init', '--name', 'Ada', '--login', 'api_key', '--root', root]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`mission-agent secret set ${MODEL_API_KEY} --root "${root}"`);
+    expect(readFileSync(join(root, 'agent.yaml'), 'utf8')).toContain('model_login: api_key');
+    const wrong = await run(['init', '--name', 'Ada', '--login', 'plan', '--root', join(root, 'other')]);
+    expect(wrong.code).toBe(2);
+    expect(wrong.err).toContain('--login must be subscription or api_key');
   });
 
   it('needs a name', async () => {
@@ -150,7 +163,7 @@ describe('status', () => {
 
 describe('secret', () => {
   it('sets, lists and deletes a value without printing it, with the harness stopped', async () => {
-    await run(['init', '--name', 'Ada', '--root', root]);
+    await run(['init', '--name', 'Ada', '--login', 'api_key', '--root', root]);
     const set = await run(['secret', 'set', MODEL_API_KEY, '--root', root], { input: 'sk-test-value\n' });
     expect(set.code).toBe(0);
     expect(set.out).toBe(`Stored a value for ${MODEL_API_KEY}.\n`);
@@ -167,7 +180,7 @@ describe('secret', () => {
   });
 
   it('tells a running harness to read the value again, and lists what it requires', async () => {
-    await run(['init', '--name', 'Ada', '--root', root]);
+    await run(['init', '--name', 'Ada', '--login', 'api_key', '--root', root]);
     const h = makeHarness({ root });
     await h.start();
     // The api_key login has no key yet, so the harness is paused.

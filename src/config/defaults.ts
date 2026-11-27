@@ -45,7 +45,7 @@ export function defaultConfig(agentName: string): AgentConfig {
   return {
     agentName,
     defaultSurface: 'terminal',
-    modelLogin: 'api_key',
+    modelLogin: 'subscription',
     maxIndexLineChars: 200,
     maxNoteBytes: 4096,
     coreMemoryMaxLines: 50,

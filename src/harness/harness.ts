@@ -8,9 +8,13 @@ import { pathsFor, type Paths } from '../paths.js';
 import { programVersion } from '../program.js';
 import {
   checkModelLogin,
+  configDirFor,
   createModelCaller,
   createRunEngine,
+  createSignIn,
   type LoginCheck,
+  type SignIn,
+  type SignInDeps,
   type ModelLoginDeps,
   type QueryFn,
 } from '../run/index.js';
@@ -117,6 +121,8 @@ export interface HarnessOptions {
   releaseCheck?: () => Promise<ReleaseCheck>;
   /** Time between two looks at whether a check is due. Default one hour. A check is due once a day. */
   releaseCheckPollMs?: number;
+  /** Replaces how the sign-in with a Claude plan starts its program, for tests. */
+  signIn?: Pick<SignInDeps, 'spawn' | 'program' | 'timeoutMs' | 'hostEnv'>;
 }
 
 /** A timer run that was missed while the harness was stopped (§B.2), as the scheduler reported it at the start. */
@@ -195,6 +201,8 @@ export interface Harness {
   };
   /** Checks the model login without a model call, and ends the pause when the login was what kept it (§5.1). */
   checkLogin(): Promise<LoginCheck>;
+  /** The sign-in with a Claude plan that the setup page starts (§A.5). One at a time. `stop()` ends it. */
+  signIn: SignIn;
   /** The tools and triggers of the harness (§A.5, §B.2). */
   catalogs: { tools: ToolCatalog; triggers: TriggerCatalog };
   /** The timer runs that were missed while the harness was stopped, reported at this start. */
@@ -1013,6 +1021,7 @@ export function createHarness(options: HarnessOptions): Harness {
     if (!running) return closeStore();
     running = false;
     pairAbort?.abort();
+    signIn.stop();
     if (aliveTimer !== undefined) clearInterval(aliveTimer);
     if (releaseTimer !== undefined) clearInterval(releaseTimer);
     if (configTimer !== undefined) clearTimeout(configTimer);
@@ -1090,6 +1099,14 @@ export function createHarness(options: HarnessOptions): Harness {
     return check;
   }
 
+  const signIn = createSignIn({
+    configDir: () => configDirFor(paths, options.sdkConfigDir),
+    checkLogin: checkLoginNow,
+    log,
+    now,
+    ...options.signIn,
+  });
+
   return {
     paths,
     store,
@@ -1147,6 +1164,7 @@ export function createHarness(options: HarnessOptions): Harness {
       },
     },
     checkLogin: checkLoginNow,
+    signIn,
     catalogs: { tools: toolCatalog, triggers: triggerCatalog },
     missedTimerRuns: () => [...missed],
     redact: (text) => redactor.redact(text),
