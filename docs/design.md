@@ -517,7 +517,7 @@ Every other tool, such as `tool:gmail` in the example of §A.4, is added by a de
 - With `api_key`, the default, the model credential is `credential:model.api_key`, a key from the Claude Console. The harness stores it in the Keychain.
 - With `subscription`, the harness has no model credential. The user signs in to Claude Code with their own Claude plan, and the runs use that sign-in. They draw from the usage limits of the user's plan.
 
-**The sign-in with a Claude plan.** The harness shows no sign-in screen of its own. It never asks for the plan's token, never reads it and never stores it. Claude Code keeps it. The user signs in with Anthropic's own command, in a terminal. The sign-in belongs to one configuration folder (§3.3), so the user signs in once for the harness's folder:
+**The sign-in with a Claude plan.** The harness shows no sign-in screen of its own. It never asks for the plan's token, never reads it and never stores it. Claude Code keeps it. The harness passes on no server address, no key and no token from the shell that started it, so a run's requests go from Claude Code on the user's computer to Anthropic, under the user's own plan. No request goes through another server or another account. The user signs in with Anthropic's own command, in a terminal. The sign-in belongs to one configuration folder (§3.3), so the user signs in once for the harness's folder:
 
 ```
 CLAUDE_CONFIG_DIR="<root>/state/claude" claude auth login

@@ -5,6 +5,7 @@ import type { LoadedConfig, Manifest, ToolProvision } from '../types.js';
 import {
   buildInputText,
   buildRunEnv,
+  hostEnvFromProcess,
   buildRunOptions,
   buildSystemAppend,
   builtInTools,
@@ -227,6 +228,25 @@ describe('environment', () => {
       ...host,
       CLAUDE_CONFIG_DIR: '/agent/state/claude',
     });
+  });
+
+  it('never passes on an address, a key or a token from the shell that started the harness', () => {
+    // With any of these, the requests of a run could go to another server or to another account.
+    const names = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'HTTPS_PROXY'];
+    const before = names.map((n) => process.env[n]);
+    try {
+      for (const n of names) process.env[n] = 'set-in-the-shell';
+      const fromShell = hostEnvFromProcess();
+      expect(Object.keys(fromShell).sort()).toEqual(['HOME', 'PATH', 'USER']);
+      const env = buildRunEnv('subscription', fromShell, '/agent/state/claude', undefined);
+      expect(Object.keys(env).sort()).toEqual(['CLAUDE_CONFIG_DIR', 'HOME', 'PATH', 'USER']);
+      expect(Object.values(env)).not.toContain('set-in-the-shell');
+    } finally {
+      names.forEach((n, i) => {
+        if (before[i] === undefined) delete process.env[n];
+        else process.env[n] = before[i];
+      });
+    }
   });
 
   it('leaves out CLAUDE_CONFIG_DIR when the folder is null', () => {

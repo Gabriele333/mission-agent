@@ -58,6 +58,8 @@ mission-agent login-help --root ~/agents/ada
 
 It is Anthropic's own sign-in command of Claude Code, for this agent's folder. The harness shows no sign-in screen. It never asks for the token of your plan, never reads it and never stores it.
 
+Nothing is sent through anyone else. Claude Code runs on your computer and talks to Anthropic with your own sign-in. The runs draw from the limits of your own plan. The author of this program has no part in that connection, and receives nothing from it.
+
 Your use of Claude through this harness is under your own agreement with Anthropic. Read Anthropic's terms for the login you choose. Anthropic has not reviewed this project.
 
 ## Secrets

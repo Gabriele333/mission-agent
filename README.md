@@ -43,8 +43,21 @@ Not built yet:
 - [Update](docs/update.md): how to move to a newer version, and how to go back.
 - [Mission library](mission-library/README.md): missions that people publish, how to add one to your agent, and how to publish yours.
 - [Design](docs/design.md): how the harness works, and why.
+- [Security](SECURITY.md): how to report a problem, and what the harness does not protect against.
 
-You can use an API key, or your own Claude plan. Your use of Claude through this harness is under your own agreement with Anthropic. Anthropic has not reviewed this project, and nothing here is a statement by Anthropic.
+You can use an API key from the Claude Console, or your own Claude plan.
+
+With a plan, you sign in yourself, with Anthropic's own `claude auth login` command. The harness shows no sign-in screen. It never asks for the login of your plan, never reads it and never stores it. It sends no request through another server or another account. Claude Code, which comes with the Claude Agent SDK, runs on your computer and talks to Anthropic under your own plan and its limits.
+
+Your use of Claude through this harness is under your own agreement with Anthropic. Anthropic decides what a plan may be used for, and it has changed those rules before: read its terms for the login you choose. Anthropic has not reviewed this project, and nothing here is a statement by Anthropic.
+
+## No warranty
+
+This is experimental software, and you use it at your own risk. It comes as it is, with no warranty of any kind, and its author is not liable for anything that comes from its use. The full terms are in [LICENSE](LICENSE).
+
+An agent acts for you. It can spend money on model calls, send messages, change files and act in the outside systems that you connect. It can do the wrong thing. You decide what it may do, you approve its actions, and you carry the cost and the result of what it does. The tests check only the format of a mission in the mission library. Nobody promises that a mission is safe: read it before you add it.
+
+To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Tests
 
