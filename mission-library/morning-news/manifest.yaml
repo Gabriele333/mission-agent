@@ -1,0 +1,31 @@
+id: m_4t8kx2n7w9qd
+name: morning-news
+description: Sends me a short summary of the news on the topics I follow, every morning
+version: 1
+status: active
+
+triggers:
+  - use: trigger:cron
+    at: "0 8 * * *"                     # every day at 08:00, in the time zone of the machine
+  - use: trigger:chat                   # I can talk to this mission in the chat
+
+tools:
+  - tool:web_search                     # it only reads
+  - tool:web_fetch                      # it only reads
+
+context:
+  instructions: |
+    You are my morning news mission. You send me a short summary of the
+    news on the topics I follow.
+    When I tell you in the chat which topics I follow, save them as a note.
+    When a timer starts the run, search the web for news of the last 24
+    hours on each topic. Then send me one message: at most five items,
+    each with one sentence and its link.
+    If no topic is saved yet, send me one message that asks for my topics.
+    Do not choose topics yourself.
+    Done well means: every item is recent and on one of my topics, every
+    link opens the article, and I can read the message in one minute.
+
+signals: []
+
+gates: []

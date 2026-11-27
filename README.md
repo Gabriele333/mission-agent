@@ -32,65 +32,15 @@ Not built yet:
 - Any tool for an outside system, such as mail or a calendar. A developer adds a tool as code (design, §A.5).
 - The `update` command, the data format number, and the `tools/` and `triggers/` folders for a user's own code (design, chapter 7).
 
-## Requirements
+## Documentation
 
-- macOS. Secrets are stored in the login Keychain.
-- Node.js 24 or later.
-- A way to reach Claude: an API key from the Claude Console, or your own Claude plan (see "Model login").
+- [Install](docs/install.md): what you need, and how to get the agent running.
+- [Configure](docs/configure.md): the model login, the secrets, Telegram and the missions.
+- [Update](docs/update.md): how to move to a newer version, and how to go back.
+- [Mission library](mission-library/README.md): missions that people publish, and how to publish yours.
+- [Design](docs/design.md): how the harness works, and why.
 
-## Build
-
-```
-git clone https://github.com/Gabriele333/mission-agent.git
-cd mission-agent
-npm install
-npm run build
-```
-
-The program is then `node dist/cli.js`. The examples below write `mission-agent` for it.
-
-## First start
-
-Choose a folder for your agent. It will hold the configuration, the missions, their memory and the database. Every command takes it as `--root`. Without `--root`, the commands use `~/mission-agent`.
-
-```
-mission-agent init --name Ada --root ~/agents/ada
-mission-agent start --root ~/agents/ada
-```
-
-`start` runs the harness in the foreground until Ctrl+C. It starts paused when something is missing, and says what. In a second terminal:
-
-```
-mission-agent setup --root ~/agents/ada      # the setup page
-mission-agent chat --root ~/agents/ada       # the chat
-mission-agent dashboard --root ~/agents/ada  # the dashboard
-mission-agent status --root ~/agents/ada
-```
-
-To let the harness start at login, install it as a service. The command shows what it will write before it writes it.
-
-```
-mission-agent service install --root ~/agents/ada
-```
-
-## Model login
-
-The harness supports two logins. You choose one in the setup page or in `agent.yaml`.
-
-- **An API key.** Store it with `mission-agent secret set credential:model.api_key`. The value is asked with hidden input and goes to the Keychain.
-- **Your own Claude plan.** You sign in to Claude Code yourself, with Anthropic's own command. `mission-agent login-help` prints that command for your folder. The harness shows no sign-in screen. It never asks for the token of your plan, never reads it and never stores it.
-
-Your use of Claude through this harness is under your own agreement with Anthropic. Read Anthropic's terms for the login you choose. Anthropic has not reviewed this project, and nothing here is a statement by Anthropic.
-
-## Secrets
-
-A secret value is never accepted in the chat, and it is never written to a file. Three commands manage secrets:
-
-```
-mission-agent secret set <id>
-mission-agent secret delete <id>
-mission-agent secret list
-```
+You can use an API key, or your own Claude plan. Your use of Claude through this harness is under your own agreement with Anthropic. Anthropic has not reviewed this project, and nothing here is a statement by Anthropic.
 
 ## Tests
 
@@ -116,6 +66,8 @@ npm run test:live    # calls the real model with your own login, and costs a lit
 | `src/harness` | Start-up, and the dispatcher that decides which run starts when |
 | `src/pages`, `src/service` | The setup page, the dashboard and the macOS service |
 | `src/cli` | The command line program |
+| `docs` | The documentation and the design |
+| `mission-library` | Missions that people publish. The program does not read it |
 
 ## Licence
 
