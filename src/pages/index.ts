@@ -35,6 +35,10 @@ export interface PagesOptions {
   service?: SetupOptions['service'];
   /** How long the Telegram pairing waits for the code. */
   pairTimeoutMs?: number;
+  /** Replaces parts of the checks of the computer. For tests. */
+  system?: SetupOptions['system'];
+  /** Opens a place in System Settings. Default: the macOS `open` command. */
+  openUrl?: SetupOptions['openUrl'];
   now?: () => Date;
   log?: (text: string) => void;
 }
@@ -100,6 +104,8 @@ export function attachPages(harness: Harness, options: PagesOptions = {}): Attac
   const src: DashboardSource = { harness, now, openStore: () => openStoreReadOnly(harness.paths.dbFile) };
   const setupOptions: SetupOptions = { service: options.service ?? {}, log };
   if (options.pairTimeoutMs !== undefined) setupOptions.pairTimeoutMs = options.pairTimeoutMs;
+  if (options.system !== undefined) setupOptions.system = options.system;
+  if (options.openUrl !== undefined) setupOptions.openUrl = options.openUrl;
 
   const groups: [AttachedPages['routes'][number]['page'], PageRoute[]][] = [
     ['file', fileRoutes()],

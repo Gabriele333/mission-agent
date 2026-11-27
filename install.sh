@@ -20,6 +20,10 @@
 # When you agree, it also installs the agent as a service of your account
 # (one file in ~/Library/LaunchAgents) and opens the setup page.
 #
+# It then checks the settings of the computer that the agent depends on, such as
+# sleep and automatic login. It changes none of them: it says what to change and
+# where, and checks again after you changed it.
+#
 # Options:
 #
 #   --root <path>       the agent's root folder, which holds its data. Asked when left out.
@@ -44,7 +48,7 @@ fail() {
 }
 
 usage() {
-  sed -n '3,36p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
+  sed -n '3,40p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
 }
 
 # True when a person can answer a question: a terminal on standard input, or a terminal to open.
@@ -264,6 +268,8 @@ main() {
     say "  $name start --root $quoted_root"
     say "To install the service later:"
     say "  $name service install --root $quoted_root"
+    say "To check the settings of this computer that the agent depends on:"
+    say "  $name check --root $quoted_root"
     return 0
   fi
 
@@ -284,6 +290,24 @@ main() {
   "$cmd" service status --root "$root"
   say ""
   say "The agent runs as a service."
+
+  # ---------------------------------------------------------------- the settings of the computer
+
+  # The check only reads. With a person to ask, it goes through each setting that is not in order.
+  say ""
+  say "Checking the settings of this computer that the agent depends on."
+  if can_ask; then
+    if [ -t 0 ]; then
+      "$cmd" check --guide --root "$root" || true
+    else
+      "$cmd" check --guide --root "$root" </dev/tty || true
+    fi
+  else
+    "$cmd" check --root "$root" || true
+  fi
+  say "To check again later: $name check --root $quoted_root"
+  say "The setup page shows the same checks, under Computer."
+  say ""
 
   # ---------------------------------------------------------------- the setup page
 

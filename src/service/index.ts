@@ -3,10 +3,12 @@ export { buildPlist, SERVICE_LABEL_PREFIX, serviceLabel, serviceLogPaths, xmlEsc
 export {
   builtCliPath,
   execLaunchctl,
+  installedProgram,
   installService,
   otherServiceFiles,
   ServiceError,
   servicePlan,
+  sessionState,
   serviceStatus,
   stableNodePath,
   uninstallService,
@@ -16,5 +18,6 @@ export {
   type ServiceOptions,
   type ServicePlan,
   type ServiceStatus,
+  type SessionState,
   type UninstallResult,
 } from './service.js';

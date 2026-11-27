@@ -35,7 +35,8 @@ The second way works only while the repository is public. Read a script before y
 3. It writes the command `~/.mission-agent/bin/mission-agent`. It links the command into a folder of your PATH when it can write to one. Otherwise it shows the line to add to `~/.zshrc`.
 4. It asks for the agent's root folder. See the next section.
 5. It asks whether to install the service. See [Start at login](#start-at-login).
-6. It opens the setup page in the browser. Continue with [Configure](configure.md).
+6. It checks the settings of the computer. See [Check the computer](#check-the-computer).
+7. It opens the setup page in the browser. Continue with [Configure](configure.md).
 
 Run it with `--help` to see its options. With `--yes` it asks nothing: it uses `~/mission-agent` and installs the service.
 
@@ -62,6 +63,35 @@ The command shows what it writes before it writes it. Four things to know:
 - One root folder runs one harness. Stop a harness that runs in a terminal before you install the service.
 
 If `service install` or `service status` says that launchd holds back the start, your login session is in a state in which launchd starts no service by itself. The command still starts the harness. Until that state ends, the harness is not started again after a crash. Log out of macOS and log in again, then run `service status`.
+
+## Check the computer
+
+The agent depends on a few settings of macOS. The install script checks them, and you can check them at any time:
+
+```
+mission-agent check --root ~/agents/ada
+```
+
+The check only reads. It changes no setting. For each one that is not in order, it says what to change and where. The setup page shows the same list under "Computer", and reads it again every minute.
+
+What every agent needs:
+
+- The root folder can be read and written, and is not inside Desktop, Documents, Downloads or iCloud Drive. macOS asks for permission before a background program reads those.
+- The login Keychain answers.
+- git is on the PATH.
+- The service is installed, switched on, and runs the agent.
+- launchd starts services by itself in your login session. If not, the agent is not started again after a crash.
+
+What a computer needs to run the agent with nobody at it, such as a computer with no screen:
+
+- Automatic login is on for your account. macOS offers it only with FileVault off, and with FileVault off the disk is not encrypted. You decide which matters more.
+- With automatic login, the screen asks for the password as soon as it turns off.
+- The computer does not go to sleep by itself.
+- The computer starts by itself after a power cut. A computer with a battery has no such setting.
+
+On a computer that you sit at, the second list is your choice, and the check shows those settings as "not set". With `--unattended`, they count as problems.
+
+With `--guide`, the check goes through each problem with you. It can open System Settings at the right place, and it checks again after your change. The install script runs it this way.
 
 ## Run it without the service
 

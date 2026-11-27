@@ -20,6 +20,7 @@ Built and tested:
 - Secrets in the macOS Keychain.
 - A chat in the terminal, a setup page and a dashboard. All three are local.
 - The mission library: the `library` commands, and the mission admin's tools that list, read and add a published mission.
+- The `check` command and the "Computer" part of the setup page. They read the settings of macOS that the agent depends on, and say what to change.
 - The install script, the `update` command and the daily check for a newer release. They were run on one Mac against a test repository, with real `git`, `npm` and `launchctl`.
 
 Built, but never run against the real service:
@@ -76,6 +77,7 @@ MISSION_AGENT_LIVE=1 npx vitest run src/service/service.live.test.ts
 | `src/harness` | Start-up, and the dispatcher that decides which run starts when |
 | `src/pages`, `src/service` | The setup page, the dashboard and the macOS service |
 | `src/update`, `src/library` | The release check, the `update` command and the reader of the mission library |
+| `src/system` | The checks of the computer's settings |
 | `src/cli` | The command line program |
 | `docs` | The documentation and the design |
 | `mission-library` | Missions that people publish. The harness reads it, and copies a mission into an agent when asked |

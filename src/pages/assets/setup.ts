@@ -10,6 +10,7 @@ export const SETUP_JS = `'use strict';
   const app = document.getElementById('app');
   let data = null;
   let service = null;
+  let system = null;
   let wizard = null;
   let finished = false;
   let stopped = false;
@@ -40,6 +41,13 @@ export const SETUP_JS = `'use strict';
   async function loadService() {
     const r = await MA.api('GET', '/api/setup/service');
     service = r.ok ? r.data : { ok: false, error: MA.errorText(r) };
+    if (data) render();
+  }
+
+  async function loadSystem() {
+    const r = await MA.api('GET', '/api/setup/system');
+    if (stopped) return;
+    system = r.ok ? r.data : { ok: false, error: MA.errorText(r) };
     if (data) render();
   }
 
@@ -441,17 +449,81 @@ export const SETUP_JS = `'use strict';
         button.disabled = true;
         const r = await MA.api('POST', '/api/setup/service/install');
         if (r.ok) {
-          note('service', 'ok', r.data.handover
+          note('service', r.data.heldBack ? 'warn' : 'ok', (r.data.handover
             ? 'The service is installed. This harness still runs in your terminal. Stop it there with Ctrl+C: the service then starts the harness within about ten seconds, and this page must be opened again with "mission-agent setup".'
-            : 'The service is installed and loaded.');
+            : 'The service is installed and loaded.')
+            + (r.data.heldBack ? ' launchd held back its start. See "Restart after a crash" under Computer below.' : ''));
         } else {
           note('service', 'bad', MA.errorText(r));
         }
         await loadService();
+        await loadSystem();
       } } });
       items.push(button);
     }
     return el('section', { className: 'card', id: 'part-service' }, [el('h2', { text: 'Service' })].concat(items));
+  }
+
+  // ------------------------------------------------------------ the computer (§H)
+
+  // The settings that are not in order, of the kind that every agent needs.
+  function systemProblems() {
+    if (!system || !system.ok) return [];
+    return system.checks.filter(function (c) { return c.group === 'needed' && c.state === 'not_ok'; });
+  }
+
+  function checkBadge(c) {
+    if (c.state === 'ok') return el('span', { className: 'badge ok', text: 'in order' });
+    if (c.state === 'unknown') return el('span', { className: 'badge', text: 'unknown' });
+    // A setting for a computer with nobody at it is a choice on any other computer.
+    return c.group === 'needed'
+      ? el('span', { className: 'badge bad', text: 'problem' })
+      : el('span', { className: 'badge warn', text: 'not set' });
+  }
+
+  function checkRow(c) {
+    const items = [el('p', { className: 'status-line' }, [checkBadge(c), ' ', el('strong', { text: c.title + '. ' }), c.detail])];
+    if (c.state === 'not_ok') {
+      if (c.fix) items.push(el('p', { className: 'small' }, [el('strong', { text: 'What to do: ' }), c.fix]));
+      if (c.command) items.push(el('pre', { text: c.command }));
+      if (c.settings) {
+        const button = el('button', { type: 'button', className: 'secondary', text: 'Open System Settings there', on: { click: async function () {
+          button.disabled = true;
+          const r = await MA.api('POST', '/api/setup/system/open', { id: c.id });
+          if (!r.ok) note('system', 'bad', MA.errorText(r));
+          button.disabled = false;
+          if (!r.ok) render();
+        } } });
+        items.push(button);
+      }
+    }
+    return el('li', { id: 'check-' + c.id }, items);
+  }
+
+  function systemPart() {
+    const items = [noteNode('system')];
+    items.push(el('p', { text: 'The settings of this computer that the agent depends on. The page only reads them. You change them in System Settings, or with the command shown.' }));
+    if (system === null) {
+      items.push(el('p', { className: 'muted', text: 'Checking the computer.' }));
+    } else if (!system.ok) {
+      items.push(el('p', { className: 'error', text: system.error }));
+    } else {
+      ['needed', 'unattended'].forEach(function (group) {
+        const list = system.checks.filter(function (c) { return c.group === group; });
+        if (list.length === 0) return;
+        items.push(el('h3', { text: system.groups[group] }));
+        if (group === 'unattended') items.push(el('p', { className: 'help', text: 'These matter for a computer with no screen that must keep the agent running. On a computer that you sit at, they are your choice.' }));
+        items.push(el('ul', { className: 'checks' }, list.map(checkRow)));
+      });
+      items.push(el('p', { className: 'muted small', text: 'Checked at ' + new Date(system.checkedAt).toLocaleTimeString() + '. The page checks again every minute.' }));
+    }
+    const again = el('button', { type: 'button', text: 'Check the computer again', on: { click: async function () {
+      again.disabled = true;
+      delete notes.system;
+      await loadSystem();
+    } } });
+    items.push(again);
+    return el('section', { className: 'card', id: 'part-system' }, [el('h2', { text: 'Computer' })].concat(items));
   }
 
   function reachPart() {
@@ -482,6 +554,15 @@ export const SETUP_JS = `'use strict';
     const h = data.harness;
     if (h.paused) out.push(el('div', { className: 'banner warn' }, [el('strong', { text: 'The agent is paused. ' }), h.pauseReason]));
     else out.push(el('div', { className: 'banner ok', text: 'The agent is running. A new value applies from the next run.' }));
+    const problems = systemProblems();
+    if (problems.length > 0 && wizard === null) {
+      out.push(el('div', { className: 'banner warn' }, [
+        el('strong', { text: 'This computer needs a change. ' }),
+        'Not in order: ' + problems.map(function (c) { return c.title; }).join(', ') + '. See ',
+        el('a', { href: '#part-system', text: 'Computer' }),
+        ' below.',
+      ]));
+    }
     return out;
   }
 
@@ -583,7 +664,7 @@ export const SETUP_JS = `'use strict';
           el('button', { type: 'button', className: 'secondary', text: 'Go through the first setup steps', on: { click: function () { wizard = 1; render(); } } }),
         ]));
       }
-      out.push(reachPart(), agentPart(), modelsPart(), limitsPart(), telegramPart(), credentialsPart(), servicePart());
+      out.push(reachPart(), agentPart(), modelsPart(), limitsPart(), telegramPart(), credentialsPart(), servicePart(), systemPart());
     }
     MA.replace(app, out);
   }
@@ -595,6 +676,9 @@ export const SETUP_JS = `'use strict';
     else if (!data.config.error && data.login.state !== 'ready') wizard = 2;
     render();
     await loadService();
+    await loadSystem();
+    // The page keeps the checks of the computer current while it is open.
+    setInterval(loadSystem, 60000);
   }
 
   startPage();

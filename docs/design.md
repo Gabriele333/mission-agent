@@ -847,6 +847,13 @@ Every run writes one logbook row (§E.2.2) with its input, tools, tokens, cost a
 - The service file names the `node` program by a path that stays valid after an upgrade of Node.js, when the PATH holds one.
 - launchd gives the harness 30 seconds to stop before it kills it. A stop waits up to 20 seconds for the runs in progress, and a kill would count as a crash.
 
+**The settings of the computer.** The agent depends on settings of the operating system that it cannot change itself. The harness has one list of checks for them. Each check reads one setting and says what it found, what to change and where. No check changes a setting. The `check` command, the install script (chapter 7.2) and the setup page ([chapter 5](#5-setup-page)) show the same list. It has two groups:
+
+- What every agent needs. The root folder can be read and written, and is in no folder that macOS protects from background programs. The Keychain answers. git is present. The service is installed, switched on and runs the harness. launchd starts services by itself.
+- What a computer needs to run the agent with nobody at it. Automatic login is on, and the screen then locks at once. The computer does not sleep by itself, and it starts by itself after a power cut.
+
+The second group is a fault only when the user says that the computer runs with nobody at it. On any other computer it is the user's choice, and it is shown as such. Automatic login needs the disk encryption of macOS to be off. The check says so and leaves the decision to the user.
+
 Four rules apply at a start:
 
 - The harness state in the database is still there (§E.2.2): the sessions, the queues and the pause.
@@ -1210,6 +1217,8 @@ A new value applies from the next run. A change to the agent name, to the core s
 
 If the configuration file is edited by hand and becomes invalid, the page shows the error and the harness keeps the last valid values (§H).
 
+The page has two more parts, which change no configuration. The service part shows the service and installs it. The computer part shows the checks of the computer's settings (§H), and reads them again every minute. For a check that is not in order it shows what to change and the command, and it can open System Settings at that place. The page itself changes no setting of the computer. A check that every agent needs and that is not in order is also named at the top of the page.
+
 ### 5.3 Moving the agent to another machine
 
 The agent configuration is portable and the secrets are not (§A.1). The user moves the agent in four steps:
@@ -1255,13 +1264,14 @@ The program and the agent's data are in two places. The program is the installed
 
 ### 7.2 Installation
 
-The user installs one release with one script, `install.sh`, which is in the repository. There are two ways to run it, and both run the same script: from a copy of the repository, or with one command that downloads it. The script does five things:
+The user installs one release with one script, `install.sh`, which is in the repository. There are two ways to run it, and both run the same script: from a copy of the repository, or with one command that downloads it. The script does six things:
 
 1. It gets the newest release from the repository with git, and builds it, in one program folder. The path of that folder is the same for every version.
 2. It writes the `mission-agent` command.
 3. It asks for the agent's root folder. The harness never chooses the root folder of a service: the `service` commands need the path (§H).
 4. It says what the service is and asks before it installs it (§H). This is where the user allows the agent to start at login and after a crash. The service belongs to the user's account, so it needs no password.
-5. It opens the setup page ([chapter 5](#5-setup-page)).
+5. It runs the checks of the computer's settings (§H). It asks whether the computer runs with nobody at it. For each setting that is not in order, it says what to change, offers to open System Settings there, and checks again after the change. The user can skip a setting.
+6. It opens the setup page ([chapter 5](#5-setup-page)).
 
 The script installs with git and not with a package manager. The release check and the update then read the same repository and the same tags (chapter 7.4).
 

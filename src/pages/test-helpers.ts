@@ -25,6 +25,13 @@ export interface PagesRig {
   /** What the fake launchctl answers to `print`. */
   printAnswer: LaunchctlResult;
   launchAgentsDir: string;
+  /**
+   * What the fake `defaults`, `pmset`, `sysadminctl`, `fdesetup` and `git` answer, by the name of
+   * the program. The checks of the computer never read the real settings in a test.
+   */
+  commandAnswers: Record<string, { code: number; stdout: string; stderr: string }>;
+  /** The places in System Settings that the page asked to open. */
+  opened: string[];
   base: string;
   token: string;
   get(path: string): Promise<Response>;
@@ -81,11 +88,25 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
     launchctlCalls: [] as string[][],
     printAnswer: { code: 113, stdout: '', stderr: 'Could not find service' } as LaunchctlResult,
     launchAgentsDir,
+    commandAnswers: {
+      defaults: { code: 0, stdout: 'ada\n', stderr: '' },
+      pmset: { code: 0, stdout: 'AC Power:\n sleep                0\n autorestart          1\n', stderr: '' },
+      sysadminctl: { code: 0, stdout: '', stderr: 'screenLock delay is immediate\n' },
+      fdesetup: { code: 0, stdout: 'FileVault is Off.\n', stderr: '' },
+      git: { code: 0, stdout: 'git version 2.0.0\n', stderr: '' },
+    } as PagesRig['commandAnswers'],
+    opened: [] as string[],
   } as PagesRig;
 
   rig.pages = attachPages(harness, {
     log: (t) => logs.push(t),
     pairTimeoutMs: options.pairTimeoutMs ?? 5000,
+    system: {
+      user: 'ada',
+      home: join(tmp, 'home'),
+      run: async (program) => rig.commandAnswers[program.split('/').pop() as string] ?? { code: 127, stdout: '', stderr: 'not found' },
+    },
+    openUrl: async (url) => void rig.opened.push(url),
     service: {
       cliPath,
       uid: 501,

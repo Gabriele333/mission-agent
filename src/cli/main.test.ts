@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -531,5 +531,129 @@ describe('update', () => {
     const copies = readdirSync(join(root, 'backups', 'update'));
     expect(copies).toHaveLength(1);
     expect(existsSync(join(root, 'backups', 'update', copies[0] as string, 'agent.yaml'))).toBe(true);
+  });
+});
+
+describe('check', () => {
+  /** A fake computer: the service runs, and the system commands answer from `answers`. */
+  let answers: Record<string, { code: number; stdout: string; stderr: string }>;
+  let session: string;
+  let opened: string[];
+
+  beforeEach(() => {
+    answers = {
+      git: { code: 0, stdout: 'git version 2.50.0\n', stderr: '' },
+      defaults: { code: 0, stdout: `${userInfo().username}\n`, stderr: '' },
+      pmset: { code: 0, stdout: 'AC Power:\n sleep                0\n autorestart          1\n', stderr: '' },
+      sysadminctl: { code: 0, stdout: '', stderr: 'screenLock delay is immediate\n' },
+      fdesetup: { code: 0, stdout: 'FileVault is Off.\n', stderr: '' },
+    };
+    session = '\ton-demand count = 0\n';
+    opened = [];
+  });
+
+  function computer(): Partial<CliIo> {
+    mkdirSync(join(tmp, 'dist'), { recursive: true });
+    writeFileSync(join(tmp, 'dist', 'cli.js'), '');
+    mkdirSync(join(tmp, 'LaunchAgents'), { recursive: true });
+    return {
+      openUrl: async (url) => void opened.push(url),
+      runCommand: async (program) => answers[program.split('/').pop() as string] ?? { code: 127, stdout: '', stderr: 'not found' },
+      serviceOptions: {
+        cliPath: join(tmp, 'dist', 'cli.js'),
+        nodePath: process.execPath,
+        uid: 501,
+        envPath: '/usr/bin:/bin',
+        launchAgentsDir: join(tmp, 'LaunchAgents'),
+        findHarness: async () => undefined,
+        launchctl: async (args) => {
+          if (args[0] === 'print' && args[1] === 'gui/501') return { code: 0, stdout: session, stderr: '' };
+          if (args[0] === 'print-disabled') return { code: 0, stdout: '', stderr: '' };
+          // Once the service file exists, launchd knows the service and it runs.
+          if (args[0] === 'print') {
+            return readdirSync(join(tmp, 'LaunchAgents')).length > 0
+              ? { code: 0, stdout: '\tstate = running\n\tpid = 4242\n', stderr: '' }
+              : { code: 113, stdout: '', stderr: 'Could not find service' };
+          }
+          return { code: 0, stdout: '', stderr: '' };
+        },
+      },
+    };
+  }
+
+  /** Writes the service file, as `service install` does. */
+  async function installTheService(io: Partial<CliIo>): Promise<void> {
+    const { servicePlan } = await import('../service/index.js');
+    const plan = servicePlan({ ...io.serviceOptions, root });
+    writeFileSync(plan.plistPath, plan.plistText);
+  }
+
+  it('prints every check and ends with exit code 0 when all that every agent needs is in order', async () => {
+    const io = computer();
+    await installTheService(io);
+    answers.pmset = { code: 0, stdout: 'Battery Power:\n sleep 1\nAC Power:\n sleep                10\n', stderr: '' };
+    const r = await run(['check', '--root', root], io);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('What every agent needs:');
+    expect(r.out).toContain('  ok       Service: The service is loaded, and the agent runs as process 4242.');
+    expect(r.out).toContain('  ok       Keychain: The login Keychain answers');
+    expect(r.out).toContain('What a computer needs to run the agent with nobody at it:');
+    // On a computer that its user sits at, sleep is a choice.
+    expect(r.out).toContain('  not set  Sleep: On mains power the computer goes to sleep by itself');
+    expect(r.out).toContain('           Command: sudo pmset -c sleep 0');
+    expect(r.out).toContain('Everything that every agent needs is in order.');
+
+    const strict = await run(['check', '--unattended', '--root', root], io);
+    expect(strict.code).toBe(1);
+    expect(strict.out).toContain('  PROBLEM  Sleep:');
+    expect(strict.out).toContain('One setting is not in order: Sleep.');
+  });
+
+  it('ends with exit code 1 and says what to do when the service is missing or launchd holds back starts', async () => {
+    session = '\ton-demand count = 1\n';
+    const r = await run(['check', '--root', root], computer());
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('  PROBLEM  Service: The service is not installed.');
+    expect(r.out).toContain(`           Command: mission-agent service install --root ${root}`);
+    expect(r.out).toContain('  PROBLEM  Restart after a crash: launchd reports "on-demand count = 1"');
+    expect(r.out).toContain('2 settings are not in order: Service, Restart after a crash.');
+    expect((await run(['check', 'now', '--root', root], computer())).code).toBe(2);
+    expect((await run(['status', '--guide', '--root', root])).err).toContain('The option --guide is not used by the status command.');
+  });
+
+  it('with --guide, asks about each open setting, opens System Settings and checks again until it is in order', async () => {
+    const io = computer();
+    await installTheService(io);
+    answers.pmset = { code: 0, stdout: 'AC Power:\n sleep                10\n autorestart          0\n', stderr: '' };
+    // The user fixes sleep after opening System Settings, and skips the start after a power cut.
+    const original = io.openUrl as (url: string) => Promise<void>;
+    io.openUrl = async (url) => {
+      await original(url);
+      answers.pmset = { code: 0, stdout: 'AC Power:\n sleep                0\n autorestart          0\n', stderr: '' };
+    };
+    // Answers: yes to "nobody at it", o to open, Enter to check again, s to skip.
+    const r = await run(['check', '--guide', '--root', root], { ...io, input: 'y\no\n\ns\n' });
+    expect(r.err).toContain('Will this computer run the agent with nobody at it, such as a computer with no screen? [y/N] ');
+    expect(opened).toEqual(['x-apple.systempreferences:com.apple.Energy-Settings.extension']);
+    expect(r.out).toContain('Sleep: in order now.');
+    expect(r.out).toContain('Start after a power cut: After a power cut the computer stays off');
+    expect(r.out).toContain('One setting is not in order: Start after a power cut.');
+    expect(r.code).toBe(1);
+  });
+
+  it('with --guide, treats the unattended settings as a choice after a no, and stops asking when the input ends', async () => {
+    const io = computer();
+    await installTheService(io);
+    answers.pmset = { code: 0, stdout: 'AC Power:\n sleep                10\n autorestart          1\n', stderr: '' };
+    const no = await run(['check', '--guide', '--root', root], { ...io, input: 'n\n' });
+    expect(no.code).toBe(0);
+    expect(no.out).toContain('  not set  Sleep:');
+    expect(no.out).toContain('Everything that every agent needs is in order.');
+
+    // A setting that stays as it is: the question comes again, and the end of the input ends the guide.
+    const ended = await run(['check', '--guide', '--unattended', '--root', root], { ...io, input: '\n' });
+    expect(ended.err).not.toContain('Will this computer');
+    expect(ended.err.split('Press Enter after the change')).toHaveLength(3);
+    expect(ended.code).toBe(1);
   });
 });

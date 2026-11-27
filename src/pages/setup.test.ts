@@ -374,3 +374,67 @@ describe('the service (§5.1 step 5)', () => {
     expect(r.launchctlCalls.some((c) => c[0] === 'bootout' || c[0] === 'bootstrap')).toBe(false);
   });
 });
+
+describe('the computer (§H)', () => {
+  interface View {
+    ok: boolean;
+    checkedAt: string;
+    groups: Record<string, string>;
+    checks: { id: string; group: string; state: string; detail: string; settings?: string; command?: string }[];
+  }
+
+  it('lists the checks of the computer with the service of this root folder', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
+    const view = await r.json<View>(await r.get('/api/setup/system'));
+    expect(view.ok).toBe(true);
+    expect(Date.parse(view.checkedAt)).not.toBeNaN();
+    expect(Object.keys(view.groups)).toEqual(['needed', 'unattended']);
+    const state = (id: string) => view.checks.find((c) => c.id === id)?.state;
+    expect(state('root-folder')).toBe('ok');
+    expect(state('keychain')).toBe('ok');
+    expect(state('auto-login')).toBe('ok');
+    expect(state('sleep')).toBe('ok');
+    // The fake launchctl knows no service.
+    const service = view.checks.find((c) => c.id === 'service');
+    expect(service).toMatchObject({ state: 'not_ok', command: `mission-agent service install --root ${r.root}` });
+    // The checks read launchd and never change it.
+    expect(r.launchctlCalls.every((c) => c[0] === 'print' || c[0] === 'print-disabled')).toBe(true);
+  });
+
+  it('opens the place in System Settings that the check named, and no other address', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
+    r.commandAnswers.pmset = { code: 0, stdout: 'AC Power:\n sleep                10\n autorestart          1\n', stderr: '' };
+    const view = await r.json<View>(await r.get('/api/setup/system'));
+    const sleep = view.checks.find((c) => c.id === 'sleep');
+    expect(sleep).toMatchObject({ state: 'not_ok', command: 'sudo pmset -c sleep 0' });
+
+    expect((await r.post('/api/setup/system/open', { id: 'sleep' })).status).toBe(200);
+    expect(r.opened).toEqual([sleep?.settings]);
+
+    // A check with no place in System Settings, an unknown check, and an address in the request.
+    for (const body of [{ id: 'keychain' }, { id: 'nope' }, { id: 'sleep', settings: 'https://example.com' }, {}]) {
+      const res = await r.post('/api/setup/system/open', body);
+      if (body.id === 'sleep') expect(res.status).toBe(200);
+      else expect(res.status).toBe(400);
+    }
+    expect(r.opened).toEqual([sleep?.settings, sleep?.settings]);
+  });
+
+  it('reports a start that launchd held back when the page installs the service', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
+    let prints = 0;
+    r.printAnswer = { code: 113, stdout: '', stderr: 'Could not find service' };
+    const original = r.launchctlCalls.push.bind(r.launchctlCalls);
+    // After the bootstrap, launchctl prints a service whose start is held back.
+    r.launchctlCalls.push = (...calls: string[][]) => {
+      for (const c of calls) {
+        if (c[0] === 'bootstrap') r.printAnswer = { code: 0, stdout: '\tstate = not running\n\tpended nondemand spawn = speculative\n', stderr: '' };
+        if (c[0] === 'print') prints += 1;
+      }
+      return original(...calls);
+    };
+    const body = await r.json<{ ok: boolean; heldBack: boolean }>(await r.post('/api/setup/service/install'));
+    expect(body).toMatchObject({ ok: true, heldBack: true });
+    expect(prints).toBeGreaterThan(1);
+  });
+});

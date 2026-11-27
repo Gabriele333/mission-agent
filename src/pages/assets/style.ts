@@ -81,6 +81,9 @@ section.card {
   white-space: nowrap;
 }
 .badge.ok { color: var(--ok); border-color: var(--ok); }
+ul.checks { list-style: none; padding: 0; margin: 0 0 12px; }
+ul.checks li { padding: 6px 0; border-top: 1px solid var(--line); }
+ul.checks li:first-child { border-top: none; }
 .badge.bad { color: var(--bad); border-color: var(--bad); }
 .badge.warn { color: var(--warn); border-color: var(--warn); }
 .field { margin: 0 0 12px; }

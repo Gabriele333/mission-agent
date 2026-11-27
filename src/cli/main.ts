@@ -55,6 +55,7 @@ import {
   type ServicePlan,
 } from '../service/index.js';
 import { shellQuote } from '../shell.js';
+import { GROUP_TITLES, openChecks, runSystemChecks, type CheckGroup, type SystemCheck } from '../system/index.js';
 import { ChatClientError, runChatClient } from '../surfaces/terminal/index.js';
 import type { AgentConfig, SecretStore } from '../types.js';
 import { checkForRelease, execCommand, runUpdate, UpdateError, type CommandRunner, type ReleaseCheck } from '../update/index.js';
@@ -116,6 +117,11 @@ Commands:
                               at login. Needs --root. It shows what it writes before it writes it.
   service uninstall           Stop and remove the service. Needs --root.
   service status              Show whether the service is installed and running. Needs --root.
+  check [--unattended] [--guide]
+                              Check the settings of this computer that the agent depends on, such as
+                              the service, the Keychain and sleep. It only reads. With --unattended,
+                              a setting that a computer with nobody at it needs counts as a problem.
+                              With --guide, it goes through each problem with you and checks again.
   library list                Show the missions of the mission library that comes with the program.
   library add <name> [--yes]  Copy one mission of the library into this agent. It shows the mission
                               and asks before it copies. With --yes, it does not ask.
@@ -136,6 +142,8 @@ const OPTIONS = {
   'telegram-user-id': { type: 'string' },
   'no-open': { type: 'boolean' },
   yes: { type: 'boolean' },
+  unattended: { type: 'boolean' },
+  guide: { type: 'boolean' },
   version: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const;
@@ -148,6 +156,8 @@ type Values = {
   'telegram-user-id'?: string | undefined;
   'no-open'?: boolean | undefined;
   yes?: boolean | undefined;
+  unattended?: boolean | undefined;
+  guide?: boolean | undefined;
   version?: boolean | undefined;
   help?: boolean | undefined;
 };
@@ -165,6 +175,7 @@ const COMMAND_OPTIONS: Record<string, (keyof Values)[]> = {
   service: [],
   library: ['yes'],
   update: ['yes'],
+  check: ['unattended', 'guide'],
 };
 
 function expandRoot(raw: string | undefined): string {
@@ -208,7 +219,7 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
     err(`Unknown command "${command}". Run "mission-agent --help" to see the commands.`);
     return 2;
   }
-  for (const key of ['name', 'surface', 'login', 'telegram-user-id', 'no-open', 'yes'] as const) {
+  for (const key of ['name', 'surface', 'login', 'telegram-user-id', 'no-open', 'yes', 'unattended', 'guide'] as const) {
     if (values[key] !== undefined && !allowed.includes(key)) {
       err(`The option --${key} is not used by the ${command} command.`);
       return 2;
@@ -246,6 +257,9 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
         return await serviceCommand(paths, positionals, values.root !== undefined, io, out);
       case 'library':
         return await libraryCommand(paths, positionals, rootFlag, values.yes === true, io, out);
+      case 'check':
+        expectArgs(positionals, 1, 'check');
+        return await checkCommand(paths, values.unattended === true, values.guide === true, io, out);
       case 'update':
         expectArgs(positionals, 1, 'update');
         return await updateCommand(paths, values.root !== undefined, values.yes === true, io, out);
@@ -338,7 +352,12 @@ async function startCommand(
   const releaseCheck = io.releaseCheck ?? (() => checkForRelease({ programDir: dir, ...(io.runCommand ? { run: io.runCommand } : {}) }));
   const harness = make({ root: paths.root, log, releaseCheck });
   // The setup page and the dashboard are served by this harness (§J).
-  attachPages(harness, { log, ...(io.serviceOptions !== undefined ? { service: io.serviceOptions } : {}) });
+  attachPages(harness, {
+    log,
+    ...(io.serviceOptions !== undefined ? { service: io.serviceOptions } : {}),
+    ...(io.runCommand !== undefined ? { system: { run: io.runCommand } } : {}),
+    ...(io.openUrl !== undefined ? { openUrl: io.openUrl } : {}),
+  });
   try {
     await harness.start();
   } catch (e) {
@@ -810,4 +829,121 @@ async function updateCommand(paths: Paths, rootGiven: boolean, yes: boolean, io:
     now: () => new Date(),
     sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   });
+}
+
+// ---------------------------------------------------------------- check
+
+/** Reads lines from standard input, one per question. `undefined` means that the input ended. */
+function lineReader(io: CliIo): { ask(question: string): Promise<string | undefined>; close(): void } {
+  const rl = createInterface({ input: io.stdin ?? process.stdin, terminal: false });
+  const lines = rl[Symbol.asyncIterator]();
+  return {
+    async ask(question) {
+      io.stderr.write(question);
+      const next = await lines.next();
+      return next.done === true ? undefined : next.value;
+    },
+    close: () => rl.close(),
+  };
+}
+
+/** The mark in front of a check. A setting of the unattended group is a fault only when the user wants that. */
+function checkMark(check: SystemCheck, unattended: boolean): string {
+  if (check.state === 'ok') return 'ok';
+  if (check.state === 'unknown') return 'unknown';
+  return check.group === 'needed' || unattended ? 'PROBLEM' : 'not set';
+}
+
+function printCheck(check: SystemCheck, unattended: boolean, out: (line: string) => void): void {
+  const indent = ' '.repeat(11);
+  out(`  ${checkMark(check, unattended).padEnd(7)}  ${check.title}: ${check.detail}`);
+  if (check.state !== 'not_ok') return;
+  if (check.fix !== undefined) out(`${indent}What to do: ${check.fix}`);
+  if (check.command !== undefined) out(`${indent}Command: ${check.command}`);
+}
+
+function printChecks(checks: SystemCheck[], unattended: boolean, out: (line: string) => void): void {
+  for (const group of ['needed', 'unattended'] as CheckGroup[]) {
+    const list = checks.filter((c) => c.group === group);
+    if (list.length === 0) continue;
+    out(`${GROUP_TITLES[group]}:`);
+    for (const check of list) printCheck(check, unattended, out);
+  }
+}
+
+async function checkCommand(paths: Paths, unattendedFlag: boolean, guide: boolean, io: CliIo, out: (line: string) => void): Promise<number> {
+  const store = (io.secretStore ?? (() => createKeychainStore()))();
+  const read = () =>
+    runSystemChecks({
+      paths,
+      service: { ...io.serviceOptions, root: paths.root },
+      keychain: () => store.has(MODEL_API_KEY),
+      ...(io.runCommand !== undefined ? { run: io.runCommand } : {}),
+    });
+
+  let unattended = unattendedFlag;
+  const reader = guide ? lineReader(io) : undefined;
+  try {
+    if (reader !== undefined && !unattended) {
+      const answer = await reader.ask('Will this computer run the agent with nobody at it, such as a computer with no screen? [y/N] ');
+      unattended = /^(y|yes)$/i.test((answer ?? '').trim());
+    }
+    let checks = await read();
+    printChecks(checks, unattended, out);
+
+    if (reader !== undefined) {
+      const skipped = new Set<string>();
+      let ended = false;
+      for (;;) {
+        const open = openChecks(checks, unattended).find((c) => !skipped.has(c.id));
+        if (open === undefined || ended) break;
+        out('');
+        out(`${open.title}: ${open.detail}`);
+        if (open.fix !== undefined) out(`What to do: ${open.fix}`);
+        if (open.command !== undefined) out(`Command, for another terminal: ${open.command}`);
+        const question =
+          open.settings !== undefined
+            ? 'Press Enter after the change to check again. Type o to open System Settings there, or s to skip: '
+            : 'Press Enter after the change to check again, or type s to skip: ';
+        // The same check is asked about until it is in order or skipped.
+        for (;;) {
+          const answer = (await reader.ask(question))?.trim().toLowerCase();
+          if (answer === undefined) {
+            ended = true;
+            break;
+          }
+          if (answer === 's' || answer === 'skip') {
+            skipped.add(open.id);
+            break;
+          }
+          if (answer === 'o' && open.settings !== undefined) {
+            try {
+              await (io.openUrl ?? openInBrowser)(open.settings);
+            } catch (e) {
+              out(`System Settings could not be opened: ${errorText(e)}`);
+            }
+            continue;
+          }
+          checks = await read();
+          const now = checks.find((c) => c.id === open.id);
+          if (now === undefined || now.state === 'ok') {
+            out(`${open.title}: in order now.`);
+            break;
+          }
+          out(`${now.title}: ${now.detail}`);
+        }
+      }
+    }
+
+    const left = openChecks(checks, unattended);
+    out('');
+    if (left.length === 0) {
+      out(unattended ? 'Every setting is in order for a computer that runs the agent with nobody at it.' : 'Everything that every agent needs is in order.');
+      return 0;
+    }
+    out(`${left.length === 1 ? 'One setting is' : `${left.length} settings are`} not in order: ${left.map((c) => c.title).join(', ')}.`);
+    return 1;
+  } finally {
+    reader?.close();
+  }
 }

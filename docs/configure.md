@@ -14,6 +14,8 @@ mission-agent setup --root ~/agents/ada
 
 The page opens in the browser. It asks for the agent name, the model login, Telegram (you can skip it), the limits and the service. It saves each answer when you give it. The harness ends its pause when the name and the model login are present.
 
+After the first setup, the page also has a part named "Computer". It shows whether the settings of macOS that the agent depends on are in order, such as the service, the Keychain, sleep and automatic login. The page reads them again every minute, and it changes none of them. See [Install](install.md), "Check the computer".
+
 ## By hand
 
 ```

@@ -32,6 +32,38 @@ const BOT_TOKEN = '123456789:fake-bot-token-for-tests-only-000000';
 const HOSTILE = '<img src=x onerror=alert(1)></script><script>alert(1)</script> "q" \'s\'';
 
 describe('the setup page script', () => {
+  it('shows the checks of the computer, opens System Settings, and checks again', async () => {
+    const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
+    r.commandAnswers.defaults = { code: 1, stdout: '', stderr: 'The domain/default pair of (x, autoLoginUser) does not exist' };
+    r.commandAnswers.pmset = { code: 0, stdout: 'AC Power:\n sleep                10\n autorestart          1\n', stderr: '' };
+    const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
+    await page.waitForText('What every agent needs');
+
+    // The service is not installed, which every agent needs: the top of the page says so.
+    expect(page.text()).toContain('This computer needs a change. Not in order: Service.');
+    const service = page.byId('check-service').textContent;
+    expect(service).toContain('problem');
+    expect(service).toContain(`mission-agent service install --root ${r.root}`);
+    // A setting for a computer with nobody at it is shown as a choice, not as a fault.
+    const login = page.byId('check-auto-login').textContent;
+    expect(login).toContain('not set');
+    expect(login).not.toContain('problem');
+    expect(page.byId('check-keychain').textContent).toContain('in order');
+    expect(page.text()).toContain('On a computer that you sit at, they are your choice.');
+
+    const sleep = page.byId('check-sleep');
+    expect(sleep.textContent).toContain('sudo pmset -c sleep 0');
+    const open = sleep.all().find((n) => n.tagName === 'BUTTON' && n.textContent === 'Open System Settings there');
+    await open?.fire('click');
+    expect(r.opened).toEqual(['x-apple.systempreferences:com.apple.Energy-Settings.extension']);
+
+    // The user changes the setting, and the page reads it again.
+    r.commandAnswers.pmset = { code: 0, stdout: 'AC Power:\n sleep                0\n autorestart          1\n', stderr: '' };
+    await page.button('Check the computer again').fire('click');
+    await until(() => page.byId('check-sleep').textContent.includes('in order'), 'the sleep check to be in order');
+    expect(page.byId('check-sleep').textContent).not.toContain('sudo pmset');
+  });
+
   it('goes through the five steps of the first setup', async () => {
     const r = await rig({ account: { apiKeySource: 'ANTHROPIC_API_KEY' } as AccountInfo });
     const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);

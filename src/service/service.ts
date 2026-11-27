@@ -248,6 +248,61 @@ export async function serviceStatus(options: ServiceOptions): Promise<ServiceSta
   return status;
 }
 
+/** What launchd reports about the user's login session and about this service in it. */
+export interface SessionState {
+  /**
+   * launchd's `on-demand count` of the login session. Above zero, the session is in the state
+   * that launchd's log calls "on-demand-only mode": launchd starts no service by itself, neither
+   * at load nor after a crash. Undefined when it could not be read.
+   */
+  onDemandCount?: number;
+  /** launchd has the service marked as disabled, so it does not load at login. */
+  serviceDisabled: boolean;
+}
+
+/** Reads the login session with `launchctl print` and `launchctl print-disabled`. It changes nothing. */
+export async function sessionState(options: ServiceOptions): Promise<SessionState> {
+  const domain = `gui/${uidOf(options)}`;
+  const label = serviceLabel(resolve(options.root));
+  const run = runnerOf(options);
+  const state: SessionState = { serviceDisabled: false };
+  const printed = await run(['print', domain]);
+  if (printed.code === 0) {
+    const count = /^\s*on-demand count = (\d+)\s*$/m.exec(printed.stdout);
+    if (count?.[1] !== undefined) state.onDemandCount = Number(count[1]);
+  }
+  const disabled = await run(['print-disabled', domain]);
+  if (disabled.code === 0) {
+    state.serviceDisabled = disabled.stdout.split('\n').some((line) => line.includes(`"${label}"`) && /=>\s*(disabled|true)\s*$/.test(line));
+  }
+  return state;
+}
+
+/** The programs that an installed service file names: node, then the built program. Undefined when the file cannot be read. */
+export function installedProgram(options: ServiceOptions): { nodePath: string; cliPath: string } | undefined {
+  const plan = servicePlan(options);
+  let text: string;
+  try {
+    text = readFileSync(plan.plistPath, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
+  if (args === undefined) return undefined;
+  const values = [...args.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => xmlUnescape(m[1] as string));
+  const [nodePath, cliPath] = values;
+  return nodePath === undefined || cliPath === undefined ? undefined : { nodePath, cliPath };
+}
+
+function xmlUnescape(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 /**
  * Removes a loaded service with `launchctl bootout`, and waits until launchd no longer knows it.
  * `bootout` returns while the harness still stops, and a `bootstrap` in that time fails.

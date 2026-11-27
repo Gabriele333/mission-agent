@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { randomInt } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { EFFORTS } from '../config/index.js';
@@ -10,6 +11,7 @@ import { StoppedError } from '../surfaces/telegram/index.js';
 import { applyConfigPatch, readConfigView, readTexts, writeTexts } from './config-edit.js';
 import { bodyObject, errorText, fail } from './http.js';
 import { shellQuote } from '../shell.js';
+import { GROUP_TITLES, runSystemChecks, type SystemCheck, type SystemCheckDeps } from '../system/index.js';
 
 /**
  * The routes of the setup page (chapter 5, §J.1). Every changing route is a POST with a JSON body.
@@ -28,7 +30,18 @@ export interface SetupOptions {
   service: Omit<ServiceOptions, 'root'>;
   /** How long the pairing waits for the code. Default 10 minutes. */
   pairTimeoutMs?: number;
+  /** Replaces parts of the checks of the computer, such as the runner of `pmset`. For tests. */
+  system?: Pick<SystemCheckDeps, 'run' | 'user' | 'home'>;
+  /** Opens a place in System Settings. Default: the macOS `open` command. */
+  openUrl?: (url: string) => Promise<void>;
   log: (text: string) => void;
+}
+
+function openWithMacOs(url: string): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    // An argument array and no shell: the address is passed as one argument.
+    execFile('/usr/bin/open', [url], { timeout: 15_000 }, (e) => (e === null ? resolvePromise() : reject(e)));
+  });
 }
 
 /** The longest credential value the page accepts. */
@@ -285,14 +298,55 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
     try {
       const result = await installService({ ...serviceOptions(), callerPid: process.pid });
       options.log(`The service ${result.plan.label} was installed: ${result.plan.plistPath}`);
-      res.json({ ok: true, plistPath: result.plan.plistPath, label: result.plan.label, handover: result.handover, replaced: result.replaced });
+      res.json({
+        ok: true,
+        plistPath: result.plan.plistPath,
+        label: result.plan.label,
+        handover: result.handover,
+        replaced: result.replaced,
+        heldBack: result.heldBack,
+      });
     } catch (err) {
       if (err instanceof ServiceError) return fail(res, 400, err.message);
       fail(res, 500, `The service could not be installed: ${errorText(err)}`);
     }
   };
 
+  // ------------------------------------------------------------ the computer (§H)
+
+  let lastChecks: SystemCheck[] = [];
+
+  const getSystem: RouteHandler = async (_req, res) => {
+    try {
+      lastChecks = await runSystemChecks({
+        ...options.system,
+        paths,
+        service: serviceOptions(),
+        // Asking whether one credential has a value shows that the Keychain answers. No value is read.
+        keychain: () => h.secrets.has(MODEL_API_KEY),
+      });
+      res.json({ ok: true, checkedAt: new Date().toISOString(), groups: GROUP_TITLES, checks: lastChecks });
+    } catch (err) {
+      fail(res, 500, `The computer could not be checked: ${errorText(err)}`);
+    }
+  };
+
+  const postSystemOpen: RouteHandler = async (req, res) => {
+    const id = bodyObject(req.body)?.id;
+    // The address is the one that the check itself gave. The request only names the check.
+    const check = lastChecks.find((c) => c.id === id);
+    if (check?.settings === undefined) return fail(res, 400, 'This check has no place in System Settings.');
+    try {
+      await (options.openUrl ?? openWithMacOs)(check.settings);
+      res.json({ ok: true });
+    } catch (err) {
+      fail(res, 500, `System Settings could not be opened: ${errorText(err)}`);
+    }
+  };
+
   return [
+    { method: 'GET', path: '/api/setup/system', handler: getSystem },
+    { method: 'POST', path: '/api/setup/system/open', handler: postSystemOpen },
     { method: 'GET', path: '/api/setup/state', handler: getState },
     { method: 'POST', path: '/api/setup/config', handler: postConfig },
     { method: 'POST', path: '/api/setup/texts', handler: postTexts },
