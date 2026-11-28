@@ -9,6 +9,7 @@ import type { QueryFn } from '../run/index.js';
 import { fakeQuery, initMsg, resultMsg } from '../run/test-helpers.js';
 import { createMemorySecretStore, MODEL_API_KEY, TELEGRAM_BOT_TOKEN } from '../secrets/index.js';
 import { readServerFile } from '../server/index.js';
+import type { TelegramSurfaceOptions } from '../surfaces/telegram/index.js';
 import { collectEvents, waitFor, type EventCollector } from '../server/test-helpers.js';
 import { SYS_GENERAL, SYS_MISSION_ADMIN, type SecretStore } from '../types.js';
 import { createHarness, HarnessAlreadyRunningError, type Harness, type HarnessOptions } from './harness.js';
@@ -21,6 +22,7 @@ let logs: string[];
 let started: Harness[];
 let streams: EventCollector[];
 let telegram: FakeSurface;
+let telegramOptions: TelegramSurfaceOptions | undefined;
 
 const BOT_TOKEN = '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
 
@@ -32,6 +34,7 @@ beforeEach(() => {
   started = [];
   streams = [];
   telegram = fakeSurface(TELEGRAM, true);
+  telegramOptions = undefined;
 });
 
 afterEach(async () => {
@@ -56,7 +59,10 @@ function make(
     log: (t) => logs.push(t),
     stopWaitMs: 2000,
     configDebounceMs: 50,
-    createTelegramSurface: () => telegram,
+    createTelegramSurface: (o) => {
+      telegramOptions = o;
+      return telegram;
+    },
   });
   started.push(h);
   return h;
@@ -247,8 +253,9 @@ describe('credentials (§A.5)', () => {
     const res = await post(h, '/api/secrets/refresh', { id: TELEGRAM_BOT_TOKEN });
     expect(res.status).toBe(200);
     expect(h.telegram.running()).toBe(true);
-    // Each mission gets its thread when Telegram starts.
-    expect(telegram.threads.filter((t) => t.op === 'create').map((t) => t.missionId).sort()).toEqual([SYS_GENERAL, SYS_MISSION_ADMIN].sort());
+    // The surface gets the menu of commands, which it publishes when it starts. No thread is created.
+    expect(telegramOptions?.commands?.().map((c) => c.command)).toEqual(['mission', 'stop', 'pause', 'resume', 'general', 'mission_admin']);
+    expect(h.store.countThreads()).toBe(0);
   });
 
   it('starts paused when Telegram is the default surface and the bot token is missing', async () => {
@@ -261,12 +268,14 @@ describe('credentials (§A.5)', () => {
 });
 
 describe('mission changes (§A.4, §4.2.1, §F.1)', () => {
-  it('creates, renames and deletes the thread, and cleans up a deleted mission', async () => {
+  it('tells the surface each time the missions change, so the menu follows, and cleans up a deleted mission', async () => {
     agentYaml('telegram_user_id: 4242\ndefault_surface: terminal\n');
     const h = make({ secrets: createMemorySecretStore({ [TELEGRAM_BOT_TOKEN]: BOT_TOKEN }) });
     await h.start();
     expect(h.telegram.running()).toBe(true);
-    telegram.threads.length = 0;
+    await h.settle();
+    const menu = () => telegramOptions?.commands?.().map((c) => c.command) ?? [];
+    const before = telegram.changes;
 
     const m = h.registry.create({
       name: 'news',
@@ -278,24 +287,38 @@ describe('mission changes (§A.4, §4.2.1, §F.1)', () => {
       gates: [],
     });
     await h.settle();
-    expect(telegram.threads).toEqual([{ op: 'create', missionId: m.id, label: 'Ada · news' }]);
+    expect(telegram.changes).toBe(before + 1);
+    expect(menu()).toContain('news');
 
     const answer = h.approvals.request({ missionId: m.id, action: 'action:email.send', toolName: 'mcp__x__y', input: {} });
     h.registry.setStatus(m.id, 'frozen');
     await h.settle();
     expect(await answer).toEqual({ kind: 'cancelled', reason: 'the mission was frozen' });
-    expect(telegram.threads.at(-1)).toEqual({ op: 'rename', missionId: m.id, label: 'Ada · news (frozen)' });
+    expect(telegram.changes).toBe(before + 2);
+    expect(menu()).not.toContain('news');
 
     h.registry.setStatus(m.id, 'active');
     await h.settle();
-    expect(telegram.threads.at(-1)).toEqual({ op: 'rename', missionId: m.id, label: 'Ada · news' });
+    expect(telegram.changes).toBe(before + 3);
+    expect(menu()).toContain('news');
+
+    h.registry.edit(m.id, { name: 'world-news' });
+    await h.settle();
+    expect(telegram.changes).toBe(before + 4);
+    expect(menu()).toContain('world_news');
+
+    h.registry.edit(m.id, { description: 'Curates the news of the world' });
+    await h.settle();
+    expect(telegram.changes).toBe(before + 5);
+    expect(telegramOptions?.commands?.().find((c) => c.command === 'world_news')?.description).toBe('Curates the news of the world');
 
     h.store.setSession(m.id, 'sess-x');
     h.store.setState(`run.session_totals:${m.id}`, '{}');
     h.store.setState(STATE_KEYS.currentChatMission, m.id);
     h.registry.remove(m.id);
     await h.settle();
-    expect(telegram.threads.at(-1)).toEqual({ op: 'delete', missionId: m.id });
+    expect(telegram.changes).toBe(before + 6);
+    expect(menu()).not.toContain('world_news');
     expect(h.store.getSession(m.id)).toBeUndefined();
     expect(h.store.getThread(m.id)).toBeUndefined();
     expect(h.store.getState(`run.session_totals:${m.id}`)).toBeUndefined();

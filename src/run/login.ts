@@ -21,7 +21,7 @@ export interface ModelLoginDeps {
   sdkConfigDir?: string | null;
   queryFn?: QueryFn;
   hostEnv?: HostEnv;
-  /** How long a check or a call may take. Default 60 seconds for the check, 120 for a call. */
+  /** How long a check or a call may take. Default 60 seconds for the check, 120 for a call. A call can set its own. */
   timeoutMs?: number;
 }
 
@@ -145,7 +145,10 @@ export class ModelCallError extends Error {
   }
 }
 
-export type ModelCaller = (prompt: string, opts: { model: string; effort: Effort; system?: string }) => Promise<string>;
+export type ModelCaller = (
+  prompt: string,
+  opts: { model: string; effort: Effort; system?: string; timeoutMs?: number },
+) => Promise<string>;
 
 /**
  * One SDK call with no tools, one step and no saved session, with the same environment and
@@ -171,7 +174,7 @@ export function createModelCaller(deps: ModelLoginDeps): ModelCaller {
     }
     if (configDir !== null) ensureDir(configDir);
     const abort = new AbortController();
-    const timeoutMs = deps.timeoutMs ?? 120_000;
+    const timeoutMs = opts.timeoutMs ?? deps.timeoutMs ?? 120_000;
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     const options: Options = {
       env: buildRunEnv(login, deps.hostEnv ?? hostEnvFromProcess(), configDir, apiKey),

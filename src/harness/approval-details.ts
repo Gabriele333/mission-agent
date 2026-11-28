@@ -14,7 +14,7 @@ import type { ApprovalRequest, Manifest, MissionRegistry, Store } from '../types
 
 export interface ApprovalDetailsContext {
   registry: Pick<MissionRegistry, 'get' | 'getByName'>;
-  store: Pick<Store, 'getSession' | 'getThread' | 'peekEvents' | 'listRuns'>;
+  store: Pick<Store, 'getSession' | 'peekEvents' | 'listRuns'>;
   paths: Pick<Paths, 'missionDir' | 'memoryDir' | 'dataDir' | 'skillsDir'>;
   pendingApprovals(): ApprovalRequest[];
   credentialIdsOf(manifest: Pick<Manifest, 'tools' | 'triggers'>): string[];
@@ -183,7 +183,6 @@ function deleteDetails(input: Record<string, unknown>, ctx: ApprovalDetailsConte
     `- its session: ${ctx.store.getSession(id) === undefined ? 'none yet' : 'the whole conversation'}`,
     `- its waiting approvals: ${approvals}`,
     `- its queued events: ${events}`,
-    `- its Telegram thread with the messages in it: ${ctx.store.getThread(id) === undefined ? 'none' : 'yes'}`,
     'It keeps the logbook rows of its runs, so the cost history stays complete.',
     'It removes no tool, no trigger and no credential, and leaves untouched what the mission created in outside systems.',
   ];

@@ -210,7 +210,7 @@ Harness
 │       └── E.2.4  (C+M) External state        (rows and files the agent owns in outside systems)
 │
 ├── F  (C) Output layer                        what leaves the system
-│   ├── F.1  (C*M) Response to user            (terminal and Telegram; one Telegram thread per mission; the harness picks the surface)
+│   ├── F.1  (C*M) Response to user            (terminal and Telegram; one chat on each, with the mission's name on its messages; the harness picks the surface)
 │   ├── F.2  (C*M) Feedback request            (not part of the first version)
 │   ├── F.3  (C) Side effects                  (emails, API calls, DB writes)
 │   ├── F.4  (C*M) Memory writes               (what this run should remember, stamped with the run's tag)
@@ -448,7 +448,7 @@ limits:                                # optional: lower than the harness defaul
 The identity fields:
 
 - `id` is a random string: `m_` plus 12 lowercase base32 characters (`m_k7q3zp2xw9ha`). The harness generates it at creation. The model never sets it and it never changes. It is lowercase because it is used as a folder name on case-insensitive filesystems. Four ids are reserved: `core`, `sys-general`, `sys-mission-admin`, `sys-self-improve`.
-- `name` is the label the user sees. It is short and lowercase, with words joined by hyphens, such as `inbox-curator`. It is unique among the missions, and the registry rejects a manifest whose name is already in use. The chat, the dashboard, the approval queue and a generated `missions/INDEX.md` show the name. Logs show it next to the id. The id alone appears only in folder names. The user can rename a mission at any time, because everything else refers to the id. A name that starts with `sys-` is reserved for the three system missions. Their name is the same as their id.
+- `name` is the label the user sees. It is short and lowercase, with words joined by hyphens, such as `inbox-curator`. It is unique among the missions, and the registry rejects a manifest whose name is already in use. The chat, the dashboard, the approval queue and a generated `missions/INDEX.md` show the name. Logs show it next to the id. The id alone appears only in folder names. The user can rename a mission at any time, because everything else refers to the id. The name also gives the mission's chat command (§B.1), so a new name has at most 32 characters and must not give a command that is already taken. A name on disk that breaks this rule still loads, and that mission has no command. A name that starts with `sys-` is reserved for the three system missions. Their name is the same as their id.
 - `description` is one line, of at most 200 characters, that says what the mission is for. Triage reads it to decide where a chat message goes (§B.3).
 - `version` starts at 1 and increases on every manifest edit. The harness increases it when it detects the change, also after a manual edit. Every logbook row records `(id, version)`, so each run is attributed to the manifest version that produced it.
 
@@ -567,19 +567,28 @@ Every run needs a mission tag before it starts. The tag decides which configurat
 
 - **Mission trigger.** A mission subscribes to triggers in its manifest (§B.2). A run started by a trigger takes that mission's tag, and so does everything the run produces: tool calls, memory writes, records.
 - **General mission.** A chat message that fits no other mission goes to the general mission (§B.3). It is a system mission with a manifest of its own ([General](#41-general)), so its runs follow the same rules as any other mission's.
-- **Untagged input.** Some inputs belong to no mission, mainly messages typed in the terminal or sent in the general mission's thread on Telegram (§B.1). A triage step (§B.3) runs first and assigns the input to a mission. The run takes that tag.
+- **Untagged input.** Some inputs belong to no mission, mainly chat messages that name no mission with a command or a reply (§B.1). A triage step (§B.3) runs first and assigns the input to a mission. The run takes that tag.
 
 #### B.1 Inbound message
 
-The user writes to the agent on one of two surfaces, the terminal or Telegram (§F.1). Each surface converts a user message into a run by calling one harness function. On Telegram, the thread says which mission the message is for. The general mission's thread is the exception: triage (§B.3) picks the mission there. In the terminal, triage always picks the mission.
+The user writes to the agent on one of two surfaces, the terminal or Telegram (§F.1). Each surface converts a user message into a run by calling one harness function. Each surface is one conversation. The harness finds the mission of a message with the first of these rules that applies:
 
-**Commands.** A message that starts with `/` is a command for the harness. It starts no run, and no model reads it. There are five:
+1. A harness command (below). No model reads it.
+2. A mission command, such as `/inbox_curator`. The message goes to that mission, with no model call.
+3. On Telegram, a reply to a message of a mission. The message goes to that mission, with no model call. A reply that gives the reason for a rejection is handled before this rule (§G).
+4. Any other message. The fast step of triage picks the mission (§B.3).
 
-- `/mission <name>` switches the current mission in the terminal (§B.3).
-- `/stop` stops the run in progress of the mission it is sent to. On Telegram that is the mission of the thread. In the terminal it is the current mission.
+**Commands.** A message that starts with `/` is a command. It starts no run, and no model reads it. The harness has five commands of its own:
+
+- `/mission <name>` makes a mission the current mission (§B.3), on every surface. `/mission` alone names the current mission and lists the missions with their commands.
+- `/stop` stops the run in progress of the current mission. `/stop <name>` stops the run of the mission it names. The name can also be the mission's command.
 - `/pause` stops every run in progress and starts no new run, whatever would start it. A chat message then receives the answer that the agent is paused.
 - `/resume` ends the pause. The events that arrived during the pause are in their queues (§B.2) and run then.
 - `/improve` starts a self-improve pass at once (§I.2).
+
+**Mission commands.** Each active mission that lists `trigger:chat` has a command: its name with each `-` replaced by `_`. For example, `inbox-curator` has `/inbox_curator`. The three system missions have `/general`, `/mission_admin` and `/self_improve`. `/inbox_curator check my mail` sends the text to that mission. `/inbox_curator` alone makes it the current mission, and the harness answers "Your next messages go to inbox-curator." A frozen mission, or one that does not list `trigger:chat`, gets the answer that it takes no messages.
+
+A command has 1 to 32 characters (§F.1). A mission has no command when its name would give a longer one, or one that is a harness command, `start` or the command of a system mission. Such a mission still loads and runs. When the mission admin creates or renames a mission, it refuses such a name and says why (§4.2.1).
 
 The harness stops a run through the SDK's interrupt call. A stopped run is not continued and not retried. The session keeps what the run did before it stopped. The logbook row records the outcome as stopped (§E.2.2), and an action of that run that waits for approval is cancelled (§G). The pause is part of the harness state, so it survives a restart.
 
@@ -605,13 +614,23 @@ A trigger has two functions, start and stop. When it sees an event, it gives the
 
 Each trigger has its own folder inside the harness, with its code and a declaration. The declaration states which parameters a subscription can set, for example the time of a timer, and the names of the credentials the trigger needs (§A.5). A trigger never calls the model. A user's own trigger is in the `triggers/` folder of the agent's root (chapter 7.6).
 
-Two triggers come with the harness. `trigger:cron` fires on a schedule. `trigger:chat` fires when a chat message is assigned to the mission, by its Telegram thread (§F.1) or by triage (§B.3). A mission that does not list `trigger:chat` never receives chat messages.
+Two triggers come with the harness. `trigger:cron` fires on a schedule. `trigger:chat` fires when a chat message is assigned to the mission, by a mission command or a reply (§B.1), or by triage (§B.3). A mission that does not list `trigger:chat` never receives chat messages.
 
 #### B.3 Triage
 
-Triage runs for a message typed in the terminal, and for a message sent in the general mission's thread on Telegram. A message sent in any other thread already has its mission (§F.1). For an input with no mission, a small classifier chooses a mission and sets `mission_id`. It reads the `name` and `description` of every active mission that lists `trigger:chat`. When no other mission fits, it chooses the general mission ([General](#41-general)). The harness sets the tag, never the model, and every write in the run carries it (§E.2.1).
+Triage runs for a chat message that names no mission with a command or a reply (§B.1). It is one fast model call, the classifier. The call reads the `name` and `description` of every active mission that lists `trigger:chat`, the name of the current mission, the recent lines of the chat and the message. It returns a mission, a confidence between 0 and 1, and sometimes a short answer. The harness checks that the mission is one of the list. When no other mission fits, the call chooses the general mission ([General](#41-general)). The harness sets the tag, never the model, and every write in the run carries it (§E.2.1).
 
-A new message is assigned to the current mission by default. The current mission is the mission of the last chat message, and the harness keeps it until triage or the user switches. Before the first chat message it is the general mission. The classifier returns a mission and a confidence between 0 and 1. Triage switches mission only when the classifier picks another mission with a confidence above 0.8. The user can also switch manually with a chat command, for example `/mission inbox-curator`. The harness refuses the command for a mission that does not list `trigger:chat`. In the general mission's thread on Telegram there is no current mission. The default there is always the general mission.
+A new message goes to the current mission by default. The current mission is the mission that last wrote to the user in the chat, or that the user last addressed. Before the first chat message it is the general mission. Triage switches mission only when the classifier picks another mission with a confidence above `triage_switch_confidence`, 0.8 by default (§A.1). The user can also switch with `/mission <name>` or a mission command (§B.1). The harness refuses a mission that does not list `trigger:chat`.
+
+**The direct answer.** The classifier may answer the message itself, but only when it chooses the general mission and the message is simple, such as a greeting or a thanks. The answer is short and in the language of the user's message. The system prompt of the call gives the agent's name. When the message stays with the general mission, has an answer and has no file, the harness sends the answer and starts no run. It writes the exchange to the logbook under the general mission's tag (§E.2.2). It keeps the last 10 such exchanges in memory, at most 4000 characters in all. It puts them before the text of the next message that goes to a run of the general mission, marked as earlier messages, and then forgets them.
+
+**What the user sees.** When a run of the general mission gets the message, the harness first sends "Working on it." When another mission gets it, the harness first sends "Calling inbox-curator.", each time. A mission command and a reply send no such line.
+
+**Recent lines.** The harness keeps the last 8 lines of the chat in memory: the user's messages and the missions' answers, each cut to 300 characters. Only the classifier reads them. A restart loses them.
+
+**Outside text.** The message, the mission names and descriptions, the name of the current mission and the recent lines go into the prompt as JSON strings. The prompt says that they are data, not instructions. The call has no tools.
+
+**Time limit.** The call has 10 seconds. When it fails or takes longer, the message goes to the current mission.
 
 The classifier is the latest Claude Haiku at effort `low` (§A.1). The harness calls it through one function, so another model can replace it later. The function makes an SDK call with no tools, so triage uses the same model login as every run (§A.5). With the `subscription` login, it draws from the same Claude plan.
 
@@ -732,7 +751,7 @@ A SQL logbook records runs and costs. Every row has `(mission_id, version)`, so 
 
 The database is one SQLite file, `state/agent.db`, inside the agent's root folder (§E.2.3). It moves with the folder ([chapter 5](#5-setup-page)). It holds three things: the logbook, the signal records (§I.1) and the harness's own state. No run can read or write it.
 
-The same database holds the harness's own state: the session registry, the approval queue, the event queues, the keys of events already seen, the pending notices, the current chat mission, the Telegram thread of each mission, the date of the last self-improve pass of each mission and whether the agent is paused. This state survives a restart of the harness.
+The same database holds the harness's own state: the session registry, the approval queue, the event queues, the keys of events already seen, the pending notices, the current chat mission, the Telegram thread where the user last wrote, whether the notice about the one chat was sent (§F.1), the Telegram threads of the earlier layout, the date of the last self-improve pass of each mission and whether the agent is paused. This state survives a restart of the harness.
 
 #### E.2.3 Memory store
 
@@ -789,16 +808,19 @@ The parts that depend on the mission are the tag and the place where a message a
 
 The agent talks to the user on two surfaces: the terminal on the machine where the harness runs, and Telegram. A developer can add other surfaces. Every surface calls the same harness function for an incoming message (§B.1).
 
-**How a surface is built.** Each surface has its own folder inside the harness, with its code and a declaration, like a tool or a trigger (§A.5, §B.2). The declaration states its id, such as `surface:telegram`, whether it has threads, and the names of the credentials it needs. A surface implements four operations:
+**How a surface is built.** Each surface has its own folder inside the harness, with its code and a declaration, like a tool or a trigger (§A.5, §B.2). The declaration states its id, such as `surface:telegram`, and the names of the credentials it needs. A surface implements three operations, and may add two more:
 
 1. Receive a message from the user, check the sender, and pass the message to the harness function for an incoming message (§B.1).
 2. Send a message to the user for a mission. When the harness asks for them, add the two rating buttons and report a press (§A.4.7).
 3. Send an approval request and return the user's answer to the gate (§G).
-4. Create, rename and delete the thread of a mission. A surface without threads, such as the terminal, leaves this out.
+4. Optional: hear that the missions changed. Telegram then publishes the list of commands again.
+5. Optional: show that the agent works on a message, from its arrival until the reply, the end of the run or an approval request.
+
+The terminal leaves out the two optional operations.
 
 A developer adds a surface by adding a folder, and no other part of the harness changes. A surface is not a tool and not an MCP server, because it must work when no run exists. Three things never pass through a model: the check of the sender, a command (§B.1) and the answer to an approval. The message tool is the only part that a mission can call (§C.5). It hands the text to the harness, which picks the surface.
 
-**Label.** Every message from the agent carries the label `[agent name] · [mission name]`, for example `Ada · inbox-curator`. On Telegram it is the name of the mission's thread. In the terminal it is written before each message.
+**Label.** Every message from the agent carries the label `[agent name] · [mission name]`, for example `Ada · inbox-curator`. In the terminal it is written before each message. On Telegram, a message from a mission other than the general mission starts with the mission's name on its own first line. A message of the general mission, and a notice of the harness, has no such line.
 
 **Where a message goes.** The harness decides this, never the model. A mission cannot name a surface.
 
@@ -811,15 +833,17 @@ A developer adds a surface by adding a folder, and no other part of the harness 
 
 - The harness runs one Telegram bot. The bot's token is the credential `credential:telegram.bot_token`, stored in the Keychain (§A.5).
 - The bot accepts messages from the user's Telegram account only, and drops all others.
-- Each mission has its own thread in the user's chat with the bot. The harness creates the thread when the mission is created. It renames the thread when the mission or the agent is renamed. When the mission is frozen, the harness adds the word "frozen" to the thread's name, and a message sent there gets the answer that the mission is frozen. It removes the word when the mission is active again. When the mission is deleted, the harness deletes the thread with its messages.
-- A message that the user sends in a thread goes to that thread's mission, and triage does not run. The general mission's thread is the exception. Triage runs there and can assign the message to another mission (§B.3). The answer then appears in that mission's thread, and the harness writes one line in the general thread that names the mission. If the mission does not list `trigger:chat`, the harness answers that the mission takes no messages.
-- A message from a mission appears in its own thread. A notice from the harness that concerns no mission appears in the general mission's thread.
+- The agent and the user write in one chat, with no thread for each mission. The agent writes where the user last wrote. When the user's last message was in a thread, the agent's messages, approval requests and the typing sign go to that thread. Otherwise they go to no thread. When Telegram refuses a call that names a thread (answer 400), the harness sends it again with no thread, and forgets the thread when that works. This covers a thread that is gone and topic mode that was turned off. Before the user's first message, the harness uses the general mission's thread of the earlier layout, when one is stored.
+- Earlier versions gave each mission its own thread. The harness keeps the stored threads, never deletes a thread in Telegram, and no longer reads which mission a thread belonged to. When such threads exist, the harness sends one notice that explains the one chat. A flag in the harness state makes sure it is sent once.
+- The bot's menu lists the harness commands and the mission commands (§B.1), each with a description. It leaves out `/improve`, which does nothing yet (§I). A mission's description is cut to 256 characters. The harness publishes the menu with `setMyCommands`, for the user's chat only. It does so at the start, after the pairing, and when the missions change. Telegram takes at most 100 commands, and the harness logs the ones it leaves out. A failure is logged and reported, and the surface goes on working.
+- While the agent works on a message, the bot shows that it is typing. The harness sends `sendChatAction` with `typing` every 4 seconds, for at most 5 minutes. It ignores errors of this call.
+- The harness remembers, in memory, which mission sent each of the last 300 messages. A reply to one of them goes to that mission (§B.1).
 - An approval request shows two buttons: approve and reject. After the reject button, the user can reply to the request with a reason (§G). A proposal list shows the two buttons once for each proposal (§I.3).
 - When a mission lists `signal:message.rated`, the last message of each of its runs shows two buttons: good and bad. A press is a signal (§I.1).
 - The harness splits a message that is longer than Telegram allows.
 - A file that the user sends is saved in the `data/` folder of the mission that receives the message. A mission can send a file from its `data/` folder with the message tool.
 
-Threads in a private chat with a bot are part of the Telegram Bot API. Its documentation, version 10.4 of 9 November 2026, says that a bot can create, rename and delete a thread there, when topic mode is on for the bot. It says that a bot can close a thread in a group forum only. Sending a message accepts a thread and buttons together. The harness therefore never closes a thread. None of this was run with a real bot.
+The calls were checked against the documentation of the Telegram Bot API, version 10.5 of 22 November 2026. `setMyCommands` takes at most 100 commands. A command has 1 to 32 characters, which are lowercase letters, digits and underscores. Its description has 1 to 256 characters. The scope `{"type": "chat", "chat_id": ...}` limits the list to one chat. `sendChatAction` shows the status for 5 seconds or less, so the harness sends it again every 4 seconds. A message that replies to another one carries it in `reply_to_message`. The documentation does not say where a message with no thread appears when topic mode is on for the bot. Bot API 10.5 also has `setMySettings`, and the harness does not use it. None of this was run with a real bot.
 
 **Terminal.**
 
@@ -997,7 +1021,7 @@ In every other respect the normal rules apply. Every change that the mission adm
 
 ### 4.1 General
 
-The general mission handles every chat message that fits no other mission (§B.3). It works like any other mission: it has its own memory, data, session, lessons and gates. What it learns stays in its own folder, and other missions do not see it. A fact reaches every mission only through core memory (§C.2).
+The general mission handles every chat message that fits no other mission (§B.3). A simple message, such as a greeting, can get a direct answer from the fast step of triage. That starts no run, and the next run of the general mission sees the exchange (§B.3). It works like any other mission: it has its own memory, data, session, lessons and gates. What it learns stays in its own folder, and other missions do not see it. A fact reaches every mission only through core memory (§C.2).
 
 When the user states a fact that every mission needs, the general mission stages it for core memory at once, with `tool:promotion_stage`. The fact waits for the user's approval (§I.3).
 
@@ -1099,9 +1123,11 @@ Missions are managed through the mission admin. Create, edit and freeze are desc
 - A mission can be frozen.
 - A mission can be deleted.
 
+Create and rename refuse a name that cannot give a chat command: one whose command would have more than 32 characters, or would be a command that is already taken (§B.1). The refusal says why and what to choose instead.
+
 Adding a mission from the library uses the create action, so it waits for the user's approval like any other creation. The request names the mission only. The harness adds the whole published manifest to the approval request, so the user approves the instructions before the mission exists.
 
-Delete removes the mission's folder, with its manifest, memory, skills and data. It also removes the mission's session, its waiting approvals and its Telegram thread with the messages in it. It removes no tool, no trigger and no credential from the harness.
+Delete removes the mission's folder, with its manifest, memory, skills and data. It also removes the mission's session and its waiting approvals. A Telegram thread of the earlier layout stays in Telegram, and the harness forgets it (§F.1). The bot's menu loses the mission's command. It removes no tool, no trigger and no credential from the harness.
 
 The mission's gates are part of its manifest and are removed with it. Delete keeps the mission's rows in the logbook, so the cost history stays complete. It leaves untouched what the mission created in outside systems, such as labels and drafts, and the mission admin tells the user what is left there. Delete needs the user's approval, and the approval request lists everything that will be removed.
 
@@ -1201,12 +1227,12 @@ The user installs the harness program and runs its `setup` command. No agent con
 
 1. The agent name (§A.2). It is required.
 2. The model login (§A.5): the user's own Claude plan, which is the default, or an API key. For a plan, the page starts Anthropic's own sign-in program, which opens Anthropic's sign-in page in the browser. The page waits until the sign-in ends, then moves on. It also shows Anthropic's sign-in command for a terminal, as the other way. The page stores an API key in the Keychain. One of the two is required.
-3. Telegram, which the user can skip. It has three stages, and the page shows one at a time. First, the user creates a bot in a chat with BotFather. Only a person can do this, so the page lists every step: how to find BotFather, what to send, and how to turn on Threaded Mode in BotFather's app. Second, the user enters the bot's token. The page stores it in the Keychain and checks the bot with Telegram at once. When topic mode (Threaded Mode in BotFather) is off, the page says how to turn it on. The pairing waits until it is on, because the harness sends every message to the user in a mission's thread (§F.1). Third, the page starts the pairing by itself. It shows a link to the bot that holds a pairing code of six digits, and a QR code of the same link for a phone. The user presses Start in Telegram, which sends `/start` and the code to the bot. Sending the code alone also works. The harness records the sender as the user's Telegram account (§F.1), and the page moves on. Without Telegram, the default surface is the terminal.
+3. Telegram, which the user can skip. It has three stages, and the page shows one at a time. First, the user creates a bot in a chat with BotFather. Only a person can do this, so the page lists every step: how to find BotFather and what to send. Second, the user enters the bot's token. The page stores it in the Keychain and checks the bot with Telegram at once. Third, the page starts the pairing by itself, with no wait. Topic mode does not matter, because the agent writes in one chat (§F.1). It shows a link to the bot that holds a pairing code of six digits, and a QR code of the same link for a phone. The user presses Start in Telegram, which sends `/start` and the code to the bot. Sending the code alone also works. The harness records the sender as the user's Telegram account (§F.1), and the page moves on. Without Telegram, the default surface is the terminal.
 4. The limits and the models. The page shows the defaults of §A.1, and the user can keep them.
 5. The service. The page installs the harness as a service of the user's account, so that it starts at login (§H). When the install script installed it already (chapter 7.2), the page shows it as installed.
 6. The computer. The page shows the checks of the computer's settings (§H), in both groups. The user says whether the computer runs with nobody at it, and the page then counts the second group as faults. The page keeps this answer only while it is open. The user can finish with a setting still not in order, because some changes need a new login. The page says which settings are still open.
 
-The page saves each answer when the user gives it, so the user can close the page and continue later. The harness stays paused until the agent name is present and the model login is ready. It then ends the pause. If Telegram is set, the harness creates the threads of the three system missions (§F.1). The page then shows the two ways to reach the agent: the terminal and the Telegram bot.
+The page saves each answer when the user gives it, so the user can close the page and continue later. The harness stays paused until the agent name is present and the model login is ready. It then ends the pause. If Telegram is set, the harness publishes the bot's menu of commands for the user's chat (§F.1). The page then shows the two ways to reach the agent: the terminal and the Telegram bot.
 
 The page does not test a credential. A wrong model credential shows on the first run: the run fails, and the user gets the credential's id (§A.5).
 
@@ -1310,7 +1336,7 @@ The command is a short shell script. It sends `install`, `uninstall`, `update` a
 
 The script installs with git and not with a package manager. The release check and the update then read the same repository and the same tags (chapter 7.4).
 
-Four variables change where the install reads and writes, so that a test never touches a real agent: `MISSION_AGENT_REPO`, `MISSION_AGENT_HOME`, `MISSION_AGENT_LAUNCH_AGENTS` and `MISSION_AGENT_KEYCHAIN_SERVICE`. The program and the service file keep the last two, so a harness that a test starts uses them too.
+Four variables change where the install reads and writes, so that a test never touches a real agent: `MISSION_AGENT_REPO`, `MISSION_AGENT_HOME`, `MISSION_AGENT_LAUNCH_AGENTS` and `MISSION_AGENT_KEYCHAIN_SERVICE`. A fifth, `MISSION_AGENT_TELEGRAM_API`, sends the harness's Telegram calls to a fake Telegram service on the same machine. It accepts only `http://127.0.0.1:<port>`; the harness logs any other value and uses the real address. The program and the service file keep the last two of the first four, and the fifth, so a harness that a test starts uses them too.
 
 A developer of the harness installs a release in the same way, apart from the development copy. A development run uses a test root folder, never the root folder of a real agent.
 

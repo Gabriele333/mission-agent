@@ -8,6 +8,7 @@ import { fakeSignInSpawn, type FakeSignInChild } from '../run/test-helpers.js';
 import { createMemorySecretStore } from '../secrets/index.js';
 import { readServerFile } from '../server/index.js';
 import type { LaunchctlResult } from '../service/index.js';
+import type { TelegramSurfaceOptions } from '../surfaces/telegram/index.js';
 import { fakeTelegram, type FakeTelegram } from '../surfaces/telegram/test-helpers.js';
 import type { SecretStore } from '../types.js';
 import type { ReleaseCheck } from '../update/index.js';
@@ -22,6 +23,8 @@ export interface PagesRig {
   secrets: SecretStore;
   telegram: FakeTelegram;
   surface: FakeSurface;
+  /** The options the harness gave the Telegram surface each time it built one. */
+  surfaceOptions: TelegramSurfaceOptions[];
   logs: string[];
   launchctlCalls: string[][];
   /** What the fake launchctl answers to `print`. */
@@ -70,6 +73,7 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
   const secrets = createMemorySecretStore(options.secrets ?? {});
   const telegram = fakeTelegram();
   const surface = fakeSurface(TELEGRAM, true);
+  const surfaceOptions: TelegramSurfaceOptions[] = [];
   const logs: string[] = [];
   const { queryFn } = scriptedQuery(simpleAnswers(), options.account);
   const signIn = fakeSignInSpawn();
@@ -81,7 +85,10 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
     log: (t) => logs.push(t),
     stopWaitMs: 2000,
     configDebounceMs: 50,
-    createTelegramSurface: () => surface,
+    createTelegramSurface: (o) => {
+      surfaceOptions.push(o);
+      return surface;
+    },
     telegramFetch: telegram.fetchFn,
     ...(options.releaseCheck !== undefined ? { releaseCheck: options.releaseCheck } : {}),
     signIn: {
@@ -104,6 +111,7 @@ export async function pagesRig(options: RigOptions = {}): Promise<PagesRig> {
     secrets,
     telegram,
     surface,
+    surfaceOptions,
     logs,
     launchctlCalls: [] as string[][],
     printAnswer: { code: 113, stdout: '', stderr: 'Could not find service' } as LaunchctlResult,

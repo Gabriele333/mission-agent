@@ -5,7 +5,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryStore } from '../../db/index.js';
 import { describeApproval } from '../../safety/index.js';
 import { SYS_GENERAL, type ApprovalAnswer, type ApprovalRequest, type IncomingMessage, type Store, type SurfaceHost } from '../../types.js';
-import { createTelegramSurface, OFFSET_STATE_KEY, REASON_WAIT_MS, type TelegramSurfaceOptions } from './surface.js';
+import {
+  createTelegramSurface,
+  OFFSET_STATE_KEY,
+  ONE_CHAT_NOTICE,
+  ONE_CHAT_NOTICE_STATE_KEY,
+  REASON_WAIT_MS,
+  REPLY_THREAD_STATE_KEY,
+  SENT_MESSAGES_KEPT,
+  TYPING_REPEAT_MS,
+  WORKING_SIGN_MAX_MS,
+  type TelegramSurfaceOptions,
+} from './surface.js';
 import { fakeTelegram, messageUpdate, OTHER, pressUpdate, settle, textUpdate, TOKEN, USER, type FakeTelegram } from './test-helpers.js';
 
 const M1 = 'm_k7q3zp2xw9ha';
@@ -38,8 +49,8 @@ function setup(opts: { tg?: FakeTelegram; store?: Store; over?: Partial<Telegram
   const waiting = new Set<string>();
   const errors: Error[] = [];
   const host: SurfaceHost = {
-    // Saves the files as the dispatcher does once it accepts a message: in the folder of the thread
-    // mission, or of the general mission.
+    // Saves the files as the dispatcher does once it accepts a message: in the folder of the mission
+    // of the replied message, or of the general mission.
     incoming: async (m) => {
       if (m.saveFiles === undefined) return void incoming.push(m);
       const { saveFiles, ...rest } = m;
@@ -93,21 +104,13 @@ function keyboardOf(params: Record<string, unknown>) {
 }
 
 describe('start and polling', () => {
-  it('checks the bot, then long-polls for messages and button presses only', async () => {
+  it('long-polls for messages and button presses only, with no check of topic mode', async () => {
     const { tg, surface, errors } = await started();
-    expect(tg.calls('getMe')).toHaveLength(1);
+    expect(tg.calls('getMe')).toHaveLength(0);
     const poll = tg.calls('getUpdates')[0]!.params;
     expect(poll).toMatchObject({ timeout: 30, allowed_updates: ['message', 'callback_query'] });
     expect(poll.offset).toBeUndefined();
     expect(errors).toEqual([]);
-    await surface.stop();
-  });
-
-  it('reports when topic mode is off', async () => {
-    const tg = fakeTelegram();
-    tg.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', has_topics_enabled: false } }));
-    const { surface, errors } = await started({ tg });
-    expect(errors.map((e) => e.message).join()).toMatch(/Topic mode is off/);
     await surface.stop();
   });
 
@@ -201,115 +204,327 @@ describe('sender check', () => {
   });
 });
 
-describe('threads', () => {
-  it('creates a thread on the first message and reuses it', async () => {
+describe('one chat: where the agent writes (§F.1)', () => {
+  it('sends with no thread when the user has not written yet and no thread is stored', async () => {
     const s = await started();
-    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'first' });
-    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'second' });
-    const created = s.tg.calls('createForumTopic');
-    expect(created).toHaveLength(1);
-    expect(created[0]!.params).toEqual({ chat_id: USER, name: 'Ada · inbox-curator' });
-    const thread = s.store.getThread(M1);
-    expect(thread).toBe(500);
-    const sent = s.tg.calls('sendMessage').map((r) => r.params);
-    expect(sent).toEqual([
-      { chat_id: USER, message_thread_id: 500, text: 'first' },
-      { chat_id: USER, message_thread_id: 500, text: 'second' },
-    ]);
+    await s.surface.send({ missionId: SYS_GENERAL, label: 'Ada · general', text: 'hi' });
+    expect(s.tg.calls('sendMessage')[0]!.params).toEqual({ chat_id: USER, text: 'hi' });
+    expect(s.tg.calls('createForumTopic')).toHaveLength(0);
     await s.surface.stop();
   });
 
-  it('createThread stores the id; a second call renames instead of creating', async () => {
-    const s = await started();
-    await s.surface.createThread!(M1, 'Ada · inbox-curator');
-    expect(s.store.getThread(M1)).toBe(500);
-    expect(s.store.missionOfThread(500)).toBe(M1);
-    await s.surface.createThread!(M1, 'Ada · inbox-curator');
-    expect(s.tg.calls('createForumTopic')).toHaveLength(1);
-    expect(s.tg.calls('editForumTopic')).toHaveLength(1);
+  it("starts in the general mission's thread of the old layout when one is stored", async () => {
+    const store = createMemoryStore();
+    store.setThread(SYS_GENERAL, 40);
+    store.setState(ONE_CHAT_NOTICE_STATE_KEY, 'sent');
+    const s = await started({ store });
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'hi' });
+    expect(s.tg.calls('sendMessage')[0]!.params).toMatchObject({ message_thread_id: 40 });
     await s.surface.stop();
   });
 
-  it('renames the thread with the label it is given', async () => {
+  it('writes where the user last wrote: in a thread, then outside any thread', async () => {
     const s = await started();
-    await s.surface.createThread!(M1, 'Ada · inbox-curator');
-    await s.surface.renameThread!(M1, 'Ada · inbox-curator frozen');
-    expect(s.tg.calls('editForumTopic')[0]!.params).toEqual({ chat_id: USER, message_thread_id: 500, name: 'Ada · inbox-curator frozen' });
-    // The same name again: Telegram says "not modified", which is not an error.
-    s.tg.script('editForumTopic', () => ({ ok: false, error_code: 400, description: 'Bad Request: TOPIC_NOT_MODIFIED' }));
-    await expect(s.surface.renameThread!(M1, 'Ada · inbox-curator frozen')).resolves.toBeUndefined();
+    s.tg.push(textUpdate(s.tg, 'in an old thread', { thread: 41 }));
+    await until(() => s.incoming.length === 1, 'incoming');
+    expect(s.store.getState(REPLY_THREAD_STATE_KEY)).toBe('41');
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'one' });
+    await s.surface.showApproval(request(), 'Ada · inbox-curator');
+    s.tg.push(textUpdate(s.tg, 'outside threads'));
+    await until(() => s.incoming.length === 2, 'incoming');
+    expect(s.store.getState(REPLY_THREAD_STATE_KEY)).toBe('none');
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'two' });
+    const threads = s.tg.calls('sendMessage').map((r) => r.params.message_thread_id);
+    expect(threads).toEqual([41, 41, undefined]);
     await s.surface.stop();
   });
 
-  it('cuts a topic name to 128 characters', async () => {
+  it('forgets a thread that no longer exists and sends once more with no thread', async () => {
     const s = await started();
-    await s.surface.createThread!(M1, `Ada · ${'x'.repeat(300)}`);
-    expect(String(s.tg.calls('createForumTopic')[0]!.params.name).length).toBe(128);
-    await s.surface.stop();
-  });
-
-  it('deletes the thread and the stored id', async () => {
-    const s = await started();
-    await s.surface.createThread!(M1, 'Ada · inbox-curator');
-    await s.surface.deleteThread!(M1);
-    expect(s.tg.calls('deleteForumTopic')[0]!.params).toEqual({ chat_id: USER, message_thread_id: 500 });
-    expect(s.store.getThread(M1)).toBeUndefined();
-    // Nothing stored: nothing to delete.
-    await s.surface.deleteThread!(M1);
-    expect(s.tg.calls('deleteForumTopic')).toHaveLength(1);
-    await s.surface.stop();
-  });
-
-  it('removes the stored id when Telegram refuses the delete with 400', async () => {
-    const s = await started();
-    await s.surface.createThread!(M1, 'Ada · inbox-curator');
-    s.tg.script('deleteForumTopic', () => ({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' }));
-    await s.surface.deleteThread!(M1);
-    expect(s.store.getThread(M1)).toBeUndefined();
-    await s.surface.stop();
-  });
-
-  it('creates the thread again when Telegram says it no longer exists', async () => {
-    const s = await started();
-    await s.surface.createThread!(M1, 'Ada · inbox-curator');
+    s.store.setState(REPLY_THREAD_STATE_KEY, '41');
     s.tg.script('sendMessage', () => ({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' }));
     await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'hello' });
-    expect(s.tg.calls('createForumTopic')).toHaveLength(2);
-    expect(s.store.getThread(M1)).toBe(501);
-    expect(s.tg.calls('sendMessage').at(-1)!.params).toMatchObject({ message_thread_id: 501, text: 'hello' });
+    const sent = s.tg.calls('sendMessage').map((r) => r.params);
+    expect(sent).toEqual([
+      { chat_id: USER, message_thread_id: 41, text: 'inbox-curator\nhello' },
+      { chat_id: USER, text: 'inbox-curator\nhello' },
+    ]);
+    expect(s.store.getState(REPLY_THREAD_STATE_KEY)).toBe('none');
+    // The same for a document.
+    s.store.setState(REPLY_THREAD_STATE_KEY, '42');
+    const dir = join(root, 'missions', M1, 'data');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'a.pdf'), 'pdf');
+    s.tg.script('sendDocument', () => ({ ok: false, error_code: 400, description: 'Bad Request: TOPIC_ID_INVALID' }));
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'file', filePath: join(dir, 'a.pdf') });
+    const docs = s.tg.calls('sendDocument').map((r) => r.params.message_thread_id);
+    expect(docs).toEqual(['42', undefined]);
+    // Any refusal with a thread is tried again with no thread, such as after topic mode was turned off.
+    s.store.setState(REPLY_THREAD_STATE_KEY, '43');
+    s.tg.script('sendMessage', () => ({ ok: false, error_code: 400, description: 'Bad Request: some other refusal' }));
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'again' });
+    expect(s.tg.calls('sendMessage').slice(-2).map((r) => r.params.message_thread_id)).toEqual([43, undefined]);
+    expect(s.store.getState(REPLY_THREAD_STATE_KEY)).toBe('none');
+    // The stored threads of the old layout stay as they are.
+    expect(s.store.getThread(SYS_GENERAL)).toBeUndefined();
+    await s.surface.stop();
+  });
+
+  it('keeps the thread when the call is refused with no thread too, and throws the first error', async () => {
+    const s = await started();
+    s.store.setState(REPLY_THREAD_STATE_KEY, '41');
+    s.tg.script('sendMessage', () => ({ ok: false, error_code: 400, description: 'Bad Request: message is too long' }));
+    s.tg.script('sendMessage', () => ({ ok: false, error_code: 400, description: 'Bad Request: refused again' }));
+    await expect(s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'x' })).rejects.toThrow(/too long/);
+    expect(s.tg.calls('sendMessage').map((r) => r.params.message_thread_id)).toEqual([41, undefined]);
+    expect(s.store.getState(REPLY_THREAD_STATE_KEY)).toBe('41');
+    await s.surface.stop();
+  });
+
+  it('does not try again with no thread for an error that is not a refusal', async () => {
+    const s = await started();
+    s.store.setState(REPLY_THREAD_STATE_KEY, '41');
+    s.tg.script('sendMessage', () => ({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }));
+    await expect(s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'x' })).rejects.toThrow(/blocked/);
+    expect(s.tg.calls('sendMessage')).toHaveLength(1);
+    expect(s.store.getState(REPLY_THREAD_STATE_KEY)).toBe('41');
+    await s.surface.stop();
+  });
+
+  it('a message in an old mission thread is like any other: the thread names no mission', async () => {
+    const s = await started();
+    s.store.setThread(M1, 41);
+    s.tg.push(textUpdate(s.tg, 'for the old mission thread', { thread: 41 }));
+    await until(() => s.incoming.length === 1, 'incoming');
+    expect(s.incoming).toEqual([{ surface: 'surface:telegram', text: 'for the old mission thread' }]);
     await s.surface.stop();
   });
 });
 
-describe('incoming messages', () => {
-  it('routes by thread: a mission thread sets the mission; the general thread, no thread and an unknown thread do not', async () => {
+describe('the label line (§F.1)', () => {
+  it('starts a message of a mission with its name on its own line, but not for the general mission or a notice', async () => {
     const s = await started();
-    s.store.setThread(M1, 41);
-    s.store.setThread(SYS_GENERAL, 40);
-    s.tg.push(
-      textUpdate(s.tg, 'for the mission', { thread: 41 }),
-      textUpdate(s.tg, 'in general', { thread: 40 }),
-      textUpdate(s.tg, 'outside threads'),
-      textUpdate(s.tg, 'unknown thread', { thread: 99 }),
-    );
-    await until(() => s.incoming.length === 4, 'incoming');
-    expect(s.incoming).toEqual([
-      { surface: 'surface:telegram', text: 'for the mission', missionId: M1 },
-      { surface: 'surface:telegram', text: 'in general' },
-      { surface: 'surface:telegram', text: 'outside threads' },
-      { surface: 'surface:telegram', text: 'unknown thread' },
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'Three new mails.' });
+    await s.surface.send({ missionId: SYS_GENERAL, label: 'Ada · general', text: 'Hello.' });
+    await s.surface.send({ missionId: null, label: 'Ada', text: 'Calling inbox-curator.' });
+    await s.surface.send({ missionId: 'm_2vx8qm4rt6pc', label: 'Ada · sell-the-flat', text: 'A buyer called.' });
+    expect(s.tg.calls('sendMessage').map((r) => r.params.text)).toEqual([
+      'inbox-curator\nThree new mails.',
+      'Hello.',
+      'Calling inbox-curator.',
+      'sell-the-flat\nA buyer called.',
     ]);
     await s.surface.stop();
   });
 
+  it('puts the name in the caption of a document, also when there is no text', async () => {
+    const s = await started();
+    const dir = join(root, 'missions', M1, 'data');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'report.pdf'), 'pdf');
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: '', filePath: join(dir, 'report.pdf') });
+    expect(s.tg.calls('sendDocument')[0]!.params.caption).toBe('inbox-curator');
+    await s.surface.stop();
+  });
+});
+
+describe('a reply to a message of a mission (§B.1)', () => {
+  it('goes to the mission that sent the message; a reply to a notice or an unknown message goes nowhere in particular', async () => {
+    const s = await started();
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'Three new mails.' });
+    await s.surface.send({ missionId: SYS_GENERAL, label: 'Ada · general', text: 'Hello.' });
+    await s.surface.send({ missionId: null, label: 'Ada', text: 'Working on it.' });
+    s.tg.push(
+      textUpdate(s.tg, 'which ones?', { replyTo: 100 }),
+      textUpdate(s.tg, 'and you?', { replyTo: 101 }),
+      textUpdate(s.tg, 'ok', { replyTo: 102 }),
+      textUpdate(s.tg, 'old', { replyTo: 7 }),
+    );
+    await until(() => s.incoming.length === 4, 'incoming');
+    expect(s.incoming).toEqual([
+      { surface: 'surface:telegram', text: 'which ones?', missionId: M1 },
+      { surface: 'surface:telegram', text: 'and you?', missionId: SYS_GENERAL },
+      { surface: 'surface:telegram', text: 'ok' },
+      { surface: 'surface:telegram', text: 'old' },
+    ]);
+    await s.surface.stop();
+  });
+
+  it('remembers a bounded number of sent messages', async () => {
+    const s = await started();
+    for (let i = 0; i <= SENT_MESSAGES_KEPT; i++) await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: `m${i}` });
+    s.tg.push(textUpdate(s.tg, 'first', { replyTo: 100 }), textUpdate(s.tg, 'second', { replyTo: 101 }));
+    await until(() => s.incoming.length === 2, 'incoming');
+    expect(s.incoming[0]).toEqual({ surface: 'surface:telegram', text: 'first' });
+    expect(s.incoming[1]).toEqual({ surface: 'surface:telegram', text: 'second', missionId: M1 });
+    await s.surface.stop();
+  });
+
+  it('routes a file sent as a reply to the folder of that mission', async () => {
+    const s = await started();
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'Send me the scan.' });
+    s.tg.files.set('documents/d1.bin', new TextEncoder().encode('one'));
+    s.tg.push(
+      messageUpdate(s.tg, {
+        caption: 'here',
+        document: { file_id: 'd1', file_name: 'scan.pdf', file_size: 3 },
+        reply_to_message: { message_id: 100, date: 1, chat: { id: USER, type: 'private' } },
+      }),
+    );
+    await until(() => s.incoming.length === 1, 'incoming');
+    expect(s.incoming[0]).toEqual({ surface: 'surface:telegram', text: 'here', missionId: M1, files: [join(root, 'missions', M1, 'data', 'scan.pdf')] });
+    await s.surface.stop();
+  });
+});
+
+describe('the menu of commands (§F.1)', () => {
+  const list = [
+    { command: 'stop', description: 'Stop' },
+    { command: 'inbox_curator', description: 'Sorts my inbox' },
+  ];
+
+  it("publishes the list for the user's chat only, at the start and when the missions change", async () => {
+    let commands = list;
+    const s = await started({ over: { commands: () => commands } });
+    await until(() => s.tg.calls('setMyCommands').length === 1, 'setMyCommands');
+    expect(s.tg.calls('setMyCommands')[0]!.params).toEqual({ commands: list, scope: { type: 'chat', chat_id: USER } });
+    commands = [list[0]!];
+    await s.surface.missionsChanged!();
+    expect(s.tg.calls('setMyCommands')[1]!.params).toEqual({ commands: [list[0]], scope: { type: 'chat', chat_id: USER } });
+    await s.surface.stop();
+  });
+
+  it('reports a refused list and keeps working', async () => {
+    const tg = fakeTelegram();
+    tg.script('setMyCommands', () => ({ ok: false, error_code: 400, description: 'Bad Request: BOT_COMMAND_INVALID' }));
+    const s = await started({ tg, over: { commands: () => list } });
+    await until(() => s.errors.length === 1, 'the error');
+    expect(s.errors[0]!.message).toMatch(/BOT_COMMAND_INVALID/);
+    await s.surface.send({ missionId: SYS_GENERAL, label: 'Ada · general', text: 'still here' });
+    expect(s.tg.calls('sendMessage')).toHaveLength(1);
+    const polls = s.tg.calls('getUpdates').length;
+    s.tg.push(textUpdate(s.tg, 'hello'));
+    await until(() => s.tg.calls('getUpdates').length > polls, 'the next poll');
+    await s.surface.stop();
+  });
+
+  it('publishes nothing without a list', async () => {
+    const s = await started();
+    await s.surface.missionsChanged!();
+    expect(s.tg.calls('setMyCommands')).toHaveLength(0);
+    await s.surface.stop();
+  });
+});
+
+describe('the notice about the one chat (§F.1)', () => {
+  it('is sent once, in the stored general thread, when threads of the old layout are stored', async () => {
+    const store = createMemoryStore();
+    store.setThread(SYS_GENERAL, 40);
+    store.setThread(M1, 41);
+    const first = await started({ store });
+    await until(() => first.tg.calls('sendMessage').length === 1, 'the notice');
+    expect(first.tg.calls('sendMessage')[0]!.params).toEqual({ chat_id: USER, message_thread_id: 40, text: ONE_CHAT_NOTICE });
+    expect(ONE_CHAT_NOTICE).toContain('/general');
+    await until(() => store.getState(ONE_CHAT_NOTICE_STATE_KEY) !== undefined, 'the flag');
+    await first.surface.stop();
+    const second = await started({ store });
+    await settle();
+    expect(second.tg.calls('sendMessage')).toHaveLength(0);
+    // The stored threads stay.
+    expect(store.getThread(M1)).toBe(41);
+    await second.surface.stop();
+  });
+
+  it('is not sent when no thread is stored', async () => {
+    const s = await started();
+    await settle();
+    expect(s.tg.calls('sendMessage')).toHaveLength(0);
+    expect(s.store.getState(ONE_CHAT_NOTICE_STATE_KEY)).toBeUndefined();
+    await s.surface.stop();
+  });
+
+  it('is tried again at the next start when it could not be sent', async () => {
+    const store = createMemoryStore();
+    store.setThread(M1, 41);
+    const tg = fakeTelegram();
+    tg.script('sendMessage', () => ({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }));
+    const first = await started({ tg, store });
+    await until(() => first.errors.length === 1, 'the error');
+    expect(store.getState(ONE_CHAT_NOTICE_STATE_KEY)).toBeUndefined();
+    await first.surface.stop();
+    const second = await started({ store });
+    await until(() => second.tg.calls('sendMessage').length === 1, 'the notice');
+    expect(second.tg.calls('sendMessage')[0]!.params.text).toBe(ONE_CHAT_NOTICE);
+    await second.surface.stop();
+  });
+});
+
+describe('the sign that the agent works (§F.1)', () => {
+  it('sends typing at once and every 4 seconds until the sign stops', async () => {
+    const s = await started();
+    const sign = s.surface.showWorking!();
+    await settle();
+    expect(s.tg.calls('sendChatAction').map((r) => r.params)).toEqual([{ chat_id: USER, action: 'typing' }]);
+    await vi.advanceTimersByTimeAsync(TYPING_REPEAT_MS);
+    await vi.advanceTimersByTimeAsync(TYPING_REPEAT_MS);
+    expect(s.tg.calls('sendChatAction')).toHaveLength(3);
+    sign.stop();
+    sign.stop();
+    await vi.advanceTimersByTimeAsync(3 * TYPING_REPEAT_MS);
+    expect(s.tg.calls('sendChatAction')).toHaveLength(3);
+    await s.surface.stop();
+  });
+
+  it('ends by itself after 5 minutes at most', async () => {
+    const s = await started();
+    s.surface.showWorking!();
+    await vi.advanceTimersByTimeAsync(WORKING_SIGN_MAX_MS + 1);
+    const count = s.tg.calls('sendChatAction').length;
+    expect(count).toBeGreaterThan(70);
+    expect(count).toBeLessThanOrEqual(1 + WORKING_SIGN_MAX_MS / TYPING_REPEAT_MS);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.tg.calls('sendChatAction')).toHaveLength(count);
+    expect(WORKING_SIGN_MAX_MS).toBe(5 * 60_000);
+    expect(TYPING_REPEAT_MS).toBe(4000);
+    await s.surface.stop();
+  });
+
+  it('goes on while one of two signs is open, uses the thread where the user wrote, and ignores errors', async () => {
+    const s = await started();
+    s.store.setState(REPLY_THREAD_STATE_KEY, '41');
+    s.tg.script('sendChatAction', () => ({ ok: false, error_code: 400, description: 'Bad Request: chat not found' }));
+    const a = s.surface.showWorking!();
+    const b = s.surface.showWorking!();
+    a.stop();
+    await vi.advanceTimersByTimeAsync(TYPING_REPEAT_MS);
+    expect(s.tg.calls('sendChatAction').length).toBe(3);
+    expect(s.tg.calls('sendChatAction').at(-1)!.params).toEqual({ chat_id: USER, action: 'typing', message_thread_id: 41 });
+    b.stop();
+    await vi.advanceTimersByTimeAsync(2 * TYPING_REPEAT_MS);
+    expect(s.tg.calls('sendChatAction').length).toBe(3);
+    expect(s.errors).toEqual([]);
+    await s.surface.stop();
+  });
+
+  it('does nothing before the start and after the stop', async () => {
+    const s = setup();
+    s.surface.showWorking!().stop();
+    await s.surface.start(s.host);
+    await s.surface.stop();
+    s.surface.showWorking!();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.tg.calls('sendChatAction')).toHaveLength(0);
+  });
+});
+
+describe('incoming messages', () => {
   it('passes commands on unchanged', async () => {
     const s = await started();
-    s.store.setThread(M1, 41);
-    s.tg.push(textUpdate(s.tg, '/stop', { thread: 41 }), textUpdate(s.tg, '/pause'));
+    s.tg.push(textUpdate(s.tg, '/stop', { thread: 41 }), textUpdate(s.tg, '/inbox_curator hi'));
     await until(() => s.incoming.length === 2, 'incoming');
     expect(s.incoming).toEqual([
-      { surface: 'surface:telegram', text: '/stop', missionId: M1 },
-      { surface: 'surface:telegram', text: '/pause' },
+      { surface: 'surface:telegram', text: '/stop' },
+      { surface: 'surface:telegram', text: '/inbox_curator hi' },
     ]);
     await s.surface.stop();
   });
@@ -345,14 +560,15 @@ describe('incoming messages', () => {
 });
 
 describe('files from the user', () => {
-  it('saves a document with a hostile name in the data folder of the thread mission', async () => {
+  it('saves a document with a hostile name in the data folder of the mission it replies to', async () => {
     const s = await started();
-    s.store.setThread(M1, 41);
+    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'Send it.' });
+    const reply_to_message = { message_id: 100, date: 1, chat: { id: USER, type: 'private' } };
     s.tg.files.set('documents/d1.bin', new TextEncoder().encode('one'));
     s.tg.files.set('documents/d2.bin', new TextEncoder().encode('two'));
     s.tg.push(
-      messageUpdate(s.tg, { thread: 41, caption: 'see this', document: { file_id: 'd1', file_name: '../../x/.evil.sh', file_size: 3 } }),
-      messageUpdate(s.tg, { thread: 41, document: { file_id: 'd2', file_name: '../../x/.evil.sh', file_size: 3 } }),
+      messageUpdate(s.tg, { reply_to_message, caption: 'see this', document: { file_id: 'd1', file_name: '../../x/.evil.sh', file_size: 3 } }),
+      messageUpdate(s.tg, { reply_to_message, document: { file_id: 'd2', file_name: '../../x/.evil.sh', file_size: 3 } }),
     );
     await until(() => s.incoming.length === 2, 'incoming');
     const dir = join(root, 'missions', M1, 'data');
@@ -364,7 +580,7 @@ describe('files from the user', () => {
     await s.surface.stop();
   });
 
-  it('saves a photo from the general thread in the general mission data folder, largest size first', async () => {
+  it('saves a photo that is no reply in the general mission data folder, largest size first', async () => {
     const s = await started();
     s.tg.script('getFile', (p) => ({ ok: true, result: { file_id: p.file_id, file_size: 3, file_path: 'photos/file_7.jpg' } }));
     s.tg.files.set('photos/file_7.jpg', new Uint8Array([1, 2, 3]));
@@ -392,12 +608,11 @@ describe('files from the user', () => {
     // A host that refuses every message, as the dispatcher does while paused: it never calls saveFiles.
     s.host.incoming = async (m) => void raw.push(m);
     await s.surface.start(s.host);
-    s.store.setThread(M1, 41);
     s.tg.files.set('documents/d1.bin', new TextEncoder().encode('one'));
-    s.tg.push(messageUpdate(s.tg, { thread: 41, caption: 'see this', document: { file_id: 'd1', file_name: 'a.txt', file_size: 3 } }));
+    s.tg.push(messageUpdate(s.tg, { caption: 'see this', document: { file_id: 'd1', file_name: 'a.txt', file_size: 3 } }));
     await until(() => raw.length === 1, 'incoming');
     await settle();
-    expect(raw[0]).toMatchObject({ surface: 'surface:telegram', text: 'see this', missionId: M1 });
+    expect(raw[0]).toMatchObject({ surface: 'surface:telegram', text: 'see this' });
     expect(raw[0]?.files).toBeUndefined();
     expect(s.tg.calls('getFile')).toHaveLength(0);
     expect(s.tg.calls('download')).toHaveLength(0);
@@ -427,7 +642,7 @@ describe('sending', () => {
     await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text });
     const parts = s.tg.calls('sendMessage').map((r) => String(r.params.text));
     expect(parts.length).toBeGreaterThan(2);
-    expect(parts.join('')).toBe(text);
+    expect(parts.join('')).toBe(`inbox-curator\n${text}`);
     for (const p of parts) expect(p.length).toBeLessThanOrEqual(4096);
     await s.surface.stop();
   });
@@ -435,7 +650,7 @@ describe('sending', () => {
   it('sends plain text: no parse mode and no entities, whatever the text holds', async () => {
     const s = await started();
     const text = '<b>bold</b> *star* _under_ [link](http://x) `code`';
-    await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text });
+    await s.surface.send({ missionId: SYS_GENERAL, label: 'Ada · general', text });
     const params = s.tg.calls('sendMessage')[0]!.params;
     expect(params.text).toBe(text);
     expect(params).not.toHaveProperty('parse_mode');
@@ -443,12 +658,10 @@ describe('sending', () => {
     await s.surface.stop();
   });
 
-  it('sends a notice that concerns no mission in the general thread', async () => {
+  it('sends a notice that concerns no mission as it is, in the same chat', async () => {
     const s = await started();
     await s.surface.send({ missionId: null, label: 'Ada', text: 'The agent is paused.' });
-    expect(s.tg.calls('createForumTopic')[0]!.params.name).toBe('Ada · general');
-    expect(s.store.getThread(SYS_GENERAL)).toBe(500);
-    expect(s.tg.calls('sendMessage')[0]!.params).toMatchObject({ message_thread_id: 500, text: 'The agent is paused.' });
+    expect(s.tg.calls('sendMessage')[0]!.params).toEqual({ chat_id: USER, text: 'The agent is paused.' });
     await s.surface.stop();
   });
 
@@ -461,8 +674,8 @@ describe('sending', () => {
     await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'Here it is.', filePath: join(dir, 'report.pdf') });
     const doc = s.tg.calls('sendDocument')[0]!.params;
     expect(doc.chat_id).toBe(String(USER));
-    expect(doc.message_thread_id).toBe('500');
-    expect(doc.caption).toBe('Here it is.');
+    expect(doc.message_thread_id).toBeUndefined();
+    expect(doc.caption).toBe('inbox-curator\nHere it is.');
     expect((doc.document as File).name).toBe('report.pdf');
     expect(await (doc.document as File).text()).toBe('pdf');
     expect(doc).not.toHaveProperty('parse_mode');
@@ -477,7 +690,6 @@ describe('sending', () => {
 
   it('retries a send after retry_after and delivers it once', async () => {
     const s = await started();
-    s.store.setThread(M1, 41);
     s.tg.script('sendMessage', () => ({ ok: false, error_code: 429, description: 'Too Many Requests: retry after 3', parameters: { retry_after: 3 } }));
     const p = s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: 'hi' });
     await settle();
@@ -492,7 +704,6 @@ describe('sending', () => {
     const s = await started();
     await s.surface.send({ missionId: M1, label: 'Ada · inbox-curator', text: '  \n ' });
     expect(s.tg.calls('sendMessage')).toHaveLength(0);
-    expect(s.tg.calls('createForumTopic')).toHaveLength(0);
     await s.surface.stop();
   });
 });
@@ -509,7 +720,7 @@ describe('approvals', () => {
   it('posts the rendered request with approve and reject buttons that fit in callback_data', async () => {
     const { msg, req, surface } = await shown();
     expect(msg.params.text).toBe(describeApproval(req, 'inbox-curator'));
-    expect(msg.params.message_thread_id).toBe(500);
+    expect(msg.params.message_thread_id).toBeUndefined();
     const rows = keyboardOf(msg.params);
     expect(rows).toEqual([
       [
@@ -553,7 +764,7 @@ describe('approvals', () => {
     expect(keyboardOf(edit)).toEqual([[{ text: 'No reason', callback_data: `n:${s.req.id}` }]]);
     expect(s.answers).toEqual([]);
 
-    s.tg.push(textUpdate(s.tg, 'Not this week.', { thread: 500, replyTo: s.messageId }));
+    s.tg.push(textUpdate(s.tg, 'Not this week.', { replyTo: s.messageId }));
     await until(() => s.answers.length === 1, 'answer');
     expect(s.answers).toEqual([[s.req.id, { kind: 'rejected', reason: 'Not this week.' }]]);
     await settle();
@@ -567,7 +778,7 @@ describe('approvals', () => {
 
   it('a reply to a request that does not wait for a reason is a normal chat message', async () => {
     const s = await shown();
-    s.tg.push(textUpdate(s.tg, 'what is this?', { thread: 500, replyTo: s.messageId }));
+    s.tg.push(textUpdate(s.tg, 'what is this?', { replyTo: s.messageId }));
     await until(() => s.incoming.length === 1, 'incoming');
     expect(s.incoming[0]).toEqual({ surface: 'surface:telegram', text: 'what is this?', missionId: M1 });
     expect(s.answers).toEqual([]);
@@ -626,7 +837,7 @@ describe('approvals', () => {
     await vi.advanceTimersByTimeAsync(REASON_WAIT_MS);
     expect(s.answers).toEqual([]);
     // The reply now is a chat message again.
-    s.tg.push(textUpdate(s.tg, 'too late', { thread: 500, replyTo: s.messageId }));
+    s.tg.push(textUpdate(s.tg, 'too late', { replyTo: s.messageId }));
     await until(() => s.incoming.length === 1, 'incoming');
     await s.surface.stop();
   });
@@ -661,7 +872,7 @@ describe('approvals', () => {
     expect(keyboardOf(edit)).toEqual([[{ text: 'No reason', callback_data: `n:${s.req.id}` }]]);
     expect(s.tg.calls('editMessageReplyMarkup')).toHaveLength(0);
 
-    s.tg.push(textUpdate(s.tg, 'Not now.', { thread: 500, replyTo: s.messageId }));
+    s.tg.push(textUpdate(s.tg, 'Not now.', { replyTo: s.messageId }));
     await until(() => s.answers.length === 1, 'answer');
     expect(s.answers).toEqual([[s.req.id, { kind: 'rejected', reason: 'Not now.' }]]);
     expect(s.incoming).toEqual([]);

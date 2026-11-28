@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, renameSync } from 'node:fs';
-import { basename, extname, join, relative } from 'node:path';
+import { basename, extname, isAbsolute, join, relative } from 'node:path';
 import type { Paths } from '../paths.js';
 import { isNotLoggedIn } from '../run/index.js';
-import { chatMissions, decideChatMission, parseCommand, type ParsedCommand } from '../triage/index.js';
+import { chatMissions, commandOf, decideChatMission, missionOfCommand, parseCommand, type ParsedCommand } from '../triage/index.js';
 import { CHAT_TRIGGER_ID, CRON_TRIGGER_ID } from '../triggers/index.js';
 import {
   SYS_GENERAL,
@@ -13,12 +13,14 @@ import {
   type MissionId,
   type MissionRegistry,
   type OutgoingMessage,
+  type RecentLine,
   type RunEngine,
   type RunInput,
   type RunResult,
   type Store,
   type TriggerEvent,
   type Triage,
+  type WorkingSign,
 } from '../types.js';
 import {
   inputSummary,
@@ -44,6 +46,22 @@ import type { SurfaceSet } from './surfaces.js';
  * (§B.1), routes chat messages to a mission (§B.3), keeps one turn per mission at a time, and sends
  * what a run produced to the right surface (§F.1).
  */
+
+/** How many lines of the chat the fast step sees (§B.3). They are kept in memory only. */
+export const RECENT_LINES_MAX = 8;
+/** Each recent line is cut to this many characters. */
+export const RECENT_LINE_MAX_CHARS = 300;
+/** How many direct answers of the fast step are kept for the general mission's next chat run. */
+export const DIRECT_EXCHANGES_MAX = 10;
+/** The most characters of direct exchanges put before that chat text. */
+export const DIRECT_EXCHANGES_MAX_CHARS = 4000;
+
+/** The fixed line when the general mission's normal run takes the message. */
+export const WORKING_TEXT = 'Working on it.';
+/** The fixed line when another mission takes the message. */
+export function callingText(missionName: string): string {
+  return `Calling ${missionName}.`;
+}
 
 export interface DispatcherDeps {
   registry: Pick<MissionRegistry, 'get' | 'getByName' | 'list'>;
@@ -87,6 +105,8 @@ export interface Dispatcher {
   resume(): Promise<{ ok: true } | { ok: false; reason: string }>;
   /** Starts the waiting work of every mission that is free. */
   kick(): void;
+  /** The run of a mission waits for an approval: the sign that the agent works ends (§F.1). */
+  runWaitsForApproval(missionId: MissionId): void;
   /** Cancels the action of a mission that waits for approval and tells the mission (§G). */
   cancelWaitingApproval(missionId: MissionId, why: string): boolean;
   /** Drops the chat messages that wait for a mission that was deleted. */
@@ -102,6 +122,8 @@ interface ChatItem {
   kind: 'chat';
   text: string;
   surface: string;
+  /** Shows the user that the agent works on this message, until the run ends. */
+  sign?: WorkingSign;
 }
 
 interface EventsItem {
@@ -113,10 +135,16 @@ type WorkItem = ChatItem | EventsItem;
 
 type RunSource = { kind: 'chat'; surface: string } | { kind: 'events' };
 
-const COMMAND_LIST = 'The commands are /mission <name> (terminal only), /stop, /pause, /resume and /improve.';
+const COMMAND_LIST =
+  'The commands are /mission <name>, /stop, /stop <mission>, /pause, /resume and /improve. ' +
+  'Each mission that takes chat messages also has its own command. Send /mission to see them.';
 
 function takesChat(m: Manifest): boolean {
   return m.triggers.some((t) => t.use === CHAT_TRIGGER_ID);
+}
+
+function cut(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
 function errorText(err: unknown): string {
@@ -147,6 +175,12 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
   const sources = new Map<MissionId, RunSource>();
   const routeChains = new Map<string, Promise<void>>();
   const routing = new Set<Promise<void>>();
+  /** The sign of the chat message whose run is in progress, per mission. */
+  const activeSigns = new Map<MissionId, WorkingSign>();
+  /** The last lines of the chat, across missions. In memory only, for the fast step (§B.3). */
+  const recent: RecentLine[] = [];
+  /** The direct answers of the fast step since the general mission's last chat run. */
+  const direct: { user: string; answer: string }[] = [];
   let midnightTimer: unknown;
   let closed = false;
 
@@ -158,8 +192,74 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
   const persist = () => writePause(store, record());
   const isPaused = () => hold !== undefined || blocker !== undefined;
   const nameOf = (id: MissionId) => registry.get(id)?.name ?? id;
-  const isThreaded = (surfaceId: string) => surfaces.get(surfaceId)?.hasThreads === true;
   const currentMission = () => store.getState(STATE_KEYS.currentChatMission) ?? SYS_GENERAL;
+  const setCurrent = (id: MissionId) => store.setState(STATE_KEYS.currentChatMission, id);
+
+  // ------------------------------------------------------------ what the fast step sees (§B.3)
+
+  function remember(speaker: string, text: string): void {
+    const t = text.trim();
+    if (t === '') return;
+    recent.push({ speaker, text: cut(t, RECENT_LINE_MAX_CHARS) });
+    if (recent.length > RECENT_LINES_MAX) recent.splice(0, recent.length - RECENT_LINES_MAX);
+  }
+
+  /** A mission wrote to the user in chat: it becomes the current mission when it takes chat. */
+  function spoke(missionId: MissionId, text: string): void {
+    remember(nameOf(missionId), text);
+    const m = registry.get(missionId);
+    if (m !== undefined && m.status === 'active' && takesChat(m)) setCurrent(missionId);
+  }
+
+  function keepDirect(user: string, answer: string): void {
+    direct.push({ user, answer });
+    if (direct.length > DIRECT_EXCHANGES_MAX) direct.splice(0, direct.length - DIRECT_EXCHANGES_MAX);
+    const size = () => direct.reduce((n, e) => n + e.user.length + e.answer.length, 0);
+    while (direct.length > 1 && size() > DIRECT_EXCHANGES_MAX_CHARS) direct.shift();
+  }
+
+  /** The chat text for the general mission, after the direct exchanges it has not seen. Clears them. */
+  function withEarlier(text: string): string {
+    if (direct.length === 0) return text;
+    const lines = direct.flatMap((e) => [`User: ${e.user}`, `Answer: ${e.answer}`]);
+    direct.length = 0;
+    const block = cut(lines.join('\n'), DIRECT_EXCHANGES_MAX_CHARS);
+    return (
+      'Earlier messages of this chat. The fast first step of the harness answered them directly, without a run of this mission:\n' +
+      `${block}\n\nThe new message:\n${text}`
+    );
+  }
+
+  /** Writes a direct answer to the logbook under the general mission's tag (§E.2.2). */
+  function logDirect(text: string, answer: string, startedAt: string): void {
+    try {
+      store.insertRun({
+        missionId: SYS_GENERAL,
+        manifestVersion: registry.get(SYS_GENERAL)?.version ?? 1,
+        startedAt,
+        endedAt: now().toISOString(),
+        input: redact(inputSummary({ kind: 'chat', text, surface: '' })),
+        toolsCalled: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        status: 'success',
+        finalText: answer,
+      });
+    } catch (err) {
+      log(`The logbook row of a direct answer could not be written: ${errorText(err)}`);
+    }
+  }
+
+  /** Starts the sign that the agent works on the surface of a message. Never throws. */
+  function startSign(surfaceId: string): WorkingSign | undefined {
+    try {
+      return surfaces.get(surfaceId)?.showWorking?.();
+    } catch (err) {
+      log(`The sign that the agent works could not be shown: ${errorText(err)}`);
+      return undefined;
+    }
+  }
 
   // ------------------------------------------------------------ sending
 
@@ -189,6 +289,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       source?.kind === 'chat' ? (surfaces.get(source.surface) ?? surfaces.defaultSurface()) : surfaces.defaultSurface();
     const msg = { missionId, label: deps.label(missionId), text: redact(text) };
     await surface.send(filePath === undefined ? msg : { ...msg, filePath });
+    spoke(missionId, msg.text);
   }
 
   // ------------------------------------------------------------ pause
@@ -276,7 +377,10 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       chatQueues.delete(missionId);
       const why =
         manifest === undefined ? 'The mission no longer exists, so this message was not passed on.' : frozenText(manifest);
-      for (const item of queue ?? []) void reply(item.surface, manifest === undefined ? null : missionId, why);
+      for (const item of queue ?? []) {
+        item.sign?.stop();
+        void reply(item.surface, manifest === undefined ? null : missionId, why);
+      }
       store.deleteEvents(missionId);
       return undefined;
     }
@@ -333,6 +437,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       item.kind === 'chat' ? { kind: 'chat', text: item.text, surface: item.surface } : { kind: 'events', events: item.events };
     const notices = store.takeNotices(missionId);
     sources.set(missionId, item.kind === 'chat' ? { kind: 'chat', surface: item.surface } : { kind: 'events' });
+    if (item.kind === 'chat' && item.sign !== undefined) activeSigns.set(missionId, item.sign);
     const startedAt = now().toISOString();
     markRunStarted(store, { missionId, manifestVersion: manifest.version, startedAt, input: redact(inputSummary(input)) });
     let result: RunResult;
@@ -356,7 +461,14 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       sources.delete(missionId);
       markRunEnded(store, missionId);
     }
-    await afterRun(manifest, item, result);
+    try {
+      await afterRun(manifest, item, result);
+    } finally {
+      if (item.kind === 'chat') {
+        item.sign?.stop();
+        if (activeSigns.get(missionId) === item.sign) activeSigns.delete(missionId);
+      }
+    }
   }
 
   /** What the user hears after a run (§F.1, §H). */
@@ -374,6 +486,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       if (result.status === 'success') {
         const text = result.finalText.trim() === '' ? 'The mission finished without an answer.' : result.finalText;
         await reply(item.surface, manifest.id, text);
+        spoke(manifest.id, text);
       } else if (problem !== undefined) {
         if (result.finalText.trim() !== '') await reply(item.surface, manifest.id, result.finalText);
         await reply(item.surface, manifest.id, problem);
@@ -423,57 +536,32 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
     return `${text}\n\nFiles the user sent, saved in your folder:\n${list}`.trim();
   }
 
-  async function handleChat(msg: IncomingMessage): Promise<void> {
-    const where = msg.missionId ?? null;
-    if (isPaused()) return reply(msg.surface, where, pausedText());
-    let files = [...(msg.files ?? [])];
-    let target: Manifest;
-
-    if (msg.missionId !== undefined) {
-      // A message in a mission's thread goes to that mission. Triage does not run (§F.1).
-      const m = registry.get(msg.missionId);
-      if (m === undefined) {
-        return reply(msg.surface, null, 'The mission of this thread no longer exists. Write in the general thread instead.');
+  /**
+   * Queues a chat message for a mission that takes it. The caller has checked the pause and that
+   * the mission is active and takes chat. Returns true when the message is queued: the sign then
+   * belongs to the queued item and ends with its run.
+   */
+  async function deliver(
+    msg: IncomingMessage,
+    target: Manifest,
+    text: string,
+    opts: { sign?: WorkingSign; announce?: string } = {},
+  ): Promise<boolean> {
+    // Files that a surface saved before the mission was known move to the mission's own folder.
+    const dataDir = deps.paths.dataDir(target.id);
+    const inside = (f: string) => {
+      const r = relative(dataDir, f);
+      return r !== '' && !r.startsWith('..') && !isAbsolute(r);
+    };
+    let files = (msg.files ?? []).map((f) => {
+      if (inside(f)) return f;
+      try {
+        return moveInto(f, dataDir);
+      } catch (err) {
+        log(`A file from the user could not be moved to ${target.id}: ${errorText(err)}`);
+        return f;
       }
-      if (m.status === 'frozen') return reply(msg.surface, m.id, frozenText(m));
-      if (!takesChat(m)) return reply(msg.surface, m.id, noChatText(m));
-      target = m;
-    } else {
-      // The terminal keeps a current mission. The general thread on Telegram has none (§B.3).
-      const generalThread = isThreaded(msg.surface);
-      const candidates = chatMissions(registry.list());
-      const result = await deps.triage.classify(
-        msg.text,
-        candidates.map(({ id, name, description }) => ({ id, name, description })),
-      );
-      const decision = decideChatMission({
-        result,
-        currentMissionId: generalThread ? SYS_GENERAL : currentMission(),
-        threshold: deps.config().triageSwitchConfidence,
-        isGeneralThread: generalThread,
-        chatMissionIds: candidates.map((c) => c.id),
-      });
-      log(`Triage: ${decision.reason}`);
-      const m = registry.get(decision.missionId) ?? registry.get(SYS_GENERAL);
-      if (m === undefined) return reply(msg.surface, null, 'No mission can take this message: the general mission is not loaded.');
-      target = m;
-      if (!generalThread) store.setState(STATE_KEYS.currentChatMission, m.id);
-      if (m.id !== SYS_GENERAL) {
-        if (generalThread) {
-          await reply(msg.surface, null, `This message went to the mission ${m.name}. Its answer appears in that mission's thread.`);
-        }
-        // The surface saved the files in the general mission's data folder before triage ran.
-        const dataDir = deps.paths.dataDir(m.id);
-        files = files.map((f) => {
-          try {
-            return moveInto(f, dataDir);
-          } catch (err) {
-            log(`A file from the user could not be moved to ${m.id}: ${errorText(err)}`);
-            return f;
-          }
-        });
-      }
-    }
+    });
 
     // The files are saved only now that the message is accepted, in the folder of the mission that takes it.
     if (msg.saveFiles !== undefined) {
@@ -482,40 +570,151 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
         saved = await msg.saveFiles(target.id);
       } catch (err) {
         log(`The files of a message for ${target.id} could not be saved: ${errorText(err)}`);
-        return reply(msg.surface, target.id, 'The file could not be saved, so the message was not passed on. Please send it again.');
+        await reply(msg.surface, target.id, 'The file could not be saved, so the message was not passed on. Please send it again.');
+        return false;
       }
-      if (saved === undefined) return;
-      files.push(...saved);
+      if (saved === undefined) return false;
+      files = [...files, ...saved];
     }
 
     cancelWaitingApproval(target.id, 'a new chat message arrived for the mission');
+    setCurrent(target.id);
+    remember('user', text);
+    // The fixed line is the harness's own text, not the model's (§B.3).
+    if (opts.announce !== undefined) await reply(msg.surface, null, opts.announce);
+    const body = chatText(text, files, target.id);
     const queue = chatQueues.get(target.id) ?? [];
-    queue.push({ kind: 'chat', text: chatText(msg.text, files, target.id), surface: msg.surface });
+    const item: ChatItem = {
+      kind: 'chat',
+      // Only the general mission gets the direct exchanges: missions stay apart from each other.
+      text: target.id === SYS_GENERAL ? withEarlier(body) : body,
+      surface: msg.surface,
+    };
+    if (opts.sign !== undefined) item.sign = opts.sign;
+    queue.push(item);
     chatQueues.set(target.id, queue);
     pump(target.id);
+    return true;
+  }
+
+  /**
+   * A chat message that no command decides (§B.3): a reply to a mission's message goes to that
+   * mission; anything else goes to the fast step, which picks the mission and sometimes answers.
+   */
+  async function handleChat(msg: IncomingMessage): Promise<void> {
+    if (isPaused()) return reply(msg.surface, null, pausedText());
+    // The sign starts before the model call, so the user sees at once that the agent works.
+    const sign = startSign(msg.surface);
+    let handed = false;
+    try {
+      if (msg.missionId !== undefined) {
+        const m = registry.get(msg.missionId);
+        // A reply to a message of a mission that no longer exists goes to the fast step.
+        if (m !== undefined) {
+          if (m.status === 'frozen') return await reply(msg.surface, null, frozenText(m));
+          if (!takesChat(m)) return await reply(msg.surface, null, noChatText(m));
+          handed = await deliver(msg, m, msg.text, sign === undefined ? {} : { sign });
+          return;
+        }
+      }
+
+      const startedAt = now().toISOString();
+      const current = currentMission();
+      const candidates = chatMissions(registry.list());
+      const result = await deps.triage.classify({
+        text: msg.text,
+        candidates: candidates.map(({ id, name, description }) => ({ id, name, description })),
+        lastMission: nameOf(current),
+        recent: recent.map((l) => ({ ...l })),
+      });
+      // The harness stopped during the call, and the store may be closed: the message goes nowhere.
+      if (closed) return;
+      const decision = decideChatMission({
+        result,
+        currentMissionId: current,
+        threshold: deps.config().triageSwitchConfidence,
+        chatMissionIds: candidates.map((c) => c.id),
+      });
+      log(`Triage: ${result.failed === true ? 'The fast step failed or timed out. ' : ''}${decision.reason}`);
+      const m = registry.get(decision.missionId) ?? registry.get(SYS_GENERAL);
+      if (m === undefined) return await reply(msg.surface, null, 'No mission can take this message: the general mission is not loaded.');
+
+      // A direct answer: no run starts. A message with a file always goes to a run.
+      const hasFiles = msg.saveFiles !== undefined || (msg.files ?? []).length > 0;
+      if (m.id === SYS_GENERAL && result.answer !== undefined && !hasFiles) {
+        const answer = redact(result.answer);
+        remember('user', msg.text);
+        setCurrent(SYS_GENERAL);
+        await reply(msg.surface, SYS_GENERAL, answer);
+        remember(m.name, answer);
+        logDirect(msg.text, answer, startedAt);
+        keepDirect(msg.text, answer);
+        return;
+      }
+      const announce = m.id === SYS_GENERAL ? WORKING_TEXT : callingText(m.name);
+      handed = await deliver(msg, m, msg.text, sign === undefined ? { announce } : { sign, announce });
+    } finally {
+      if (!handed) sign?.stop();
+    }
+  }
+
+  /** A mission's own command (§B.1): `/inbox_curator <text>` goes to that mission with no model call. */
+  async function handleMissionCommand(msg: IncomingMessage, m: Manifest, rest: string): Promise<void> {
+    if (m.status === 'frozen') return reply(msg.surface, null, frozenText(m));
+    if (!takesChat(m)) return reply(msg.surface, null, noChatText(m));
+    const hasFiles = msg.saveFiles !== undefined || (msg.files ?? []).length > 0;
+    if (rest === '' && !hasFiles) {
+      setCurrent(m.id);
+      return reply(msg.surface, null, `Your next messages go to ${m.name}.`);
+    }
+    if (isPaused()) return reply(msg.surface, null, pausedText());
+    const sign = startSign(msg.surface);
+    let handed = false;
+    try {
+      handed = await deliver(msg, m, rest, sign === undefined ? {} : { sign });
+    } finally {
+      if (!handed) sign?.stop();
+    }
   }
 
   // ------------------------------------------------------------ commands (§B.1)
 
-  function missionCommand(msg: IncomingMessage, arg: string): string {
-    if (isThreaded(msg.surface)) {
-      return 'The /mission command works in the terminal only. Here, write in the thread of the mission.';
+  /** A mission by name, id or command, with or without the `/`. */
+  function lookUp(arg: string): Manifest | undefined {
+    const a = arg.trim().replace(/^\//, '');
+    return registry.getByName(a) ?? registry.get(a) ?? missionOfCommand(a, registry.list());
+  }
+
+  function missionList(): string {
+    const names = chatMissions(registry.list()).map((m) => {
+      const cmd = commandOf(m);
+      return cmd === undefined ? m.name : `${m.name} (/${cmd})`;
+    });
+    return `Missions that take chat messages: ${names.join(', ')}.`;
+  }
+
+  function missionCommand(arg: string): string {
+    const list = missionList();
+    if (arg === '') {
+      return `The current mission is ${nameOf(currentMission())}. To switch, send /mission <name> or the command of the mission. ${list}`;
     }
-    const names = chatMissions(registry.list())
-      .map((m) => m.name)
-      .join(', ');
-    const list = `Missions that take chat messages: ${names}.`;
-    if (arg === '') return `The current mission is ${nameOf(currentMission())}. To switch, send /mission <name>. ${list}`;
-    const m = registry.getByName(arg) ?? registry.get(arg);
+    const m = lookUp(arg);
     if (m === undefined) return `There is no mission named "${arg}". ${list}`;
     if (m.status === 'frozen') return `${frozenText(m)} ${list}`;
     if (!takesChat(m)) return `${noChatText(m)} ${list}`;
-    store.setState(STATE_KEYS.currentChatMission, m.id);
+    setCurrent(m.id);
     return `The current mission is now ${m.name}.`;
   }
 
-  async function stopCommand(msg: IncomingMessage): Promise<string> {
-    const target = isThreaded(msg.surface) ? (msg.missionId ?? SYS_GENERAL) : currentMission();
+  async function stopCommand(arg: string): Promise<string> {
+    let target: MissionId;
+    if (arg === '') {
+      target = currentMission();
+    } else {
+      const m = lookUp(arg);
+      if (m === undefined) return `There is no mission named "${arg}", so nothing was stopped.`;
+      target = m.id;
+    }
     const stopped = await engine.stop(target);
     // The engine cancels the waiting approval of the run it stops. This covers a request left without a run.
     deps.approvals.cancelForMission(target, 'the user sent /stop');
@@ -542,12 +741,13 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
   }
 
   async function handleCommand(msg: IncomingMessage, cmd: ParsedCommand): Promise<void> {
-    const say = (text: string) => reply(msg.surface, msg.missionId ?? null, text);
+    // The answer to a command is the harness's own text, so it carries no mission label.
+    const say = (text: string) => reply(msg.surface, null, text);
     switch (cmd.name) {
       case 'mission':
-        return say(missionCommand(msg, cmd.arg));
+        return say(missionCommand(cmd.arg));
       case 'stop':
-        return say(await stopCommand(msg));
+        return say(await stopCommand(cmd.arg));
       case 'pause':
         return say(await pauseCommand());
       case 'resume':
@@ -557,6 +757,15 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       case 'unknown':
         return say(`"${cmd.arg}" is not a command. ${COMMAND_LIST}`);
     }
+  }
+
+  /** The order of §B.1: a harness command, a mission's command, then a chat message. No model reads a command. */
+  async function route(msg: IncomingMessage, cmd: ParsedCommand | null): Promise<void> {
+    if (cmd === null) return handleChat(msg);
+    if (cmd.name !== 'unknown') return handleCommand(msg, cmd);
+    const m = cmd.word === undefined ? undefined : missionOfCommand(cmd.word, registry.list());
+    if (m === undefined) return handleCommand(msg, cmd);
+    return handleMissionCommand(msg, m, cmd.rest ?? '');
   }
 
   /** Messages of one surface are routed one after the other, so their order is kept. */
@@ -578,7 +787,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
       const cmd = parseCommand(msg.text);
       // /stop and /pause act at once, also while an earlier message is still being routed.
       if (cmd !== null && (cmd.name === 'stop' || cmd.name === 'pause')) return handleCommand(msg, cmd);
-      return serial(msg.surface, () => (cmd !== null ? handleCommand(msg, cmd) : handleChat(msg)));
+      return serial(msg.surface, () => route(msg, cmd));
     },
 
     onEvent(missionId, event) {
@@ -606,7 +815,12 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
     resume,
     kick,
     cancelWaitingApproval,
+    runWaitsForApproval(missionId) {
+      activeSigns.get(missionId)?.stop();
+      activeSigns.delete(missionId);
+    },
     forgetMission(missionId) {
+      for (const item of chatQueues.get(missionId) ?? []) item.sign?.stop();
       chatQueues.delete(missionId);
     },
     busy: () => [...running.keys()],
@@ -619,6 +833,9 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
     },
     close() {
       closed = true;
+      for (const queue of chatQueues.values()) for (const item of queue) item.sign?.stop();
+      for (const sign of activeSigns.values()) sign.stop();
+      activeSigns.clear();
       if (midnightTimer !== undefined) clearTimer(midnightTimer);
       midnightTimer = undefined;
     },

@@ -172,7 +172,7 @@ async function notifyChanged(ctx: ToolContext, id: MissionId): Promise<string> {
     await ctx.host.missionChanged(id);
     return '';
   } catch (err) {
-    return ` The change is saved, but the harness could not update the mission's chat thread: ${errorText(err)}`;
+    return ` The change is saved, but the harness could not update the list of chat commands: ${errorText(err)}`;
   }
 }
 
@@ -272,7 +272,10 @@ export function listCatalog(deps: MissionRegistryToolDeps): ToolResult {
       signals: [],
       signalsNote: 'No signal is available yet. Give an empty list.',
       rules: {
-        name: 'Lowercase letters and digits, words joined by hyphens, at most 40 characters, unique, not starting with "sys-".',
+        name:
+          'Lowercase letters and digits, words joined by hyphens, at most 32 characters, unique, not starting with "sys-". ' +
+          'The name gives the mission its chat command, with each hyphen replaced by an underscore, so it cannot be ' +
+          'general, mission, stop, pause, resume, improve, start, mission-admin or self-improve.',
         descriptionMaxChars: config.maxDescriptionChars,
         instructionsMaxChars: config.maxInstructionsChars,
         limitsMax: {
@@ -347,10 +350,10 @@ export async function deleteMission(ctx: ToolContext, args: { mission: string })
   try {
     await ctx.host.cleanUpDeletedMission(id);
   } catch (err) {
-    cleanUp = ` Its folder is removed, but removing its session, waiting approvals and chat thread failed: ${errorText(err)}`;
+    cleanUp = ` Its folder is removed, but removing its session and waiting approvals failed: ${errorText(err)}`;
   }
   return okResult(
-    `Deleted mission ${name} (${id}). Its folder, session, waiting approvals and chat thread are removed. ` +
+    `Deleted mission ${name} (${id}). Its folder, session and waiting approvals are removed. ` +
       `Its logbook rows are kept.${cleanUp} ` +
       'Tell the user that what the mission created in outside systems, such as labels, drafts or files, is left untouched.',
   );
@@ -471,7 +474,7 @@ export function missionRegistrySdkTools(ctx: ToolContext, deps: MissionRegistryT
     ),
     deleteMission: tool(
       REGISTRY_TOOLS.deleteMission,
-      'Deletes a mission: its folder with manifest, memory, skills and data, its session, its waiting approvals and its chat thread. ' +
+      'Deletes a mission: its folder with manifest, memory, skills and data, its session and its waiting approvals. ' +
         `Its logbook rows are kept. What it created in outside systems is left untouched. ${APPROVAL_NOTE}`,
       missionRefShape,
       (args) => deleteMission(ctx, args),

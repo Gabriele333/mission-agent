@@ -100,11 +100,17 @@ describe('pairTelegramUser', () => {
 });
 
 describe('checkBot', () => {
-  it('reports the username and whether topic mode is on', async () => {
+  it('reports the username, whatever topic mode is', async () => {
     const tg = fakeTelegram();
-    expect(await checkBot(TOKEN, tg.fetchFn)).toEqual({ ok: true, username: 'ada_bot', topicsEnabled: true });
-    tg.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', username: 'b_bot' } }));
-    expect(await checkBot(TOKEN, tg.fetchFn)).toEqual({ ok: true, username: 'b_bot', topicsEnabled: false });
+    expect(await checkBot(TOKEN, tg.fetchFn)).toEqual({ ok: true, username: 'ada_bot' });
+    tg.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', username: 'b_bot', has_topics_enabled: false } }));
+    expect(await checkBot(TOKEN, tg.fetchFn)).toEqual({ ok: true, username: 'b_bot' });
+  });
+
+  it('asks the address it is given', async () => {
+    const tg = fakeTelegram();
+    await checkBot(TOKEN, tg.fetchFn, 'http://127.0.0.1:8081');
+    expect(tg.requests[0]!.url.startsWith('http://127.0.0.1:8081/bot')).toBe(true);
   });
 
   it('explains a refused token', async () => {

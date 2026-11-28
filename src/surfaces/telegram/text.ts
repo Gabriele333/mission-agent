@@ -8,8 +8,6 @@
 export const MESSAGE_LIMIT = 4096;
 /** Longest caption of a document (`sendDocument`: 0-1024 characters). */
 export const CAPTION_LIMIT = 1024;
-/** Longest name of a topic (`createForumTopic`: 1-128 characters). */
-export const TOPIC_NAME_LIMIT = 128;
 /** Longest text of a callback answer (`answerCallbackQuery`: 0-200 characters). */
 export const CALLBACK_TEXT_LIMIT = 200;
 

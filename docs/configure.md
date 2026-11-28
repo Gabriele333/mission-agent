@@ -82,11 +82,20 @@ Telegram is optional. Without it you chat in the terminal: `mission-agent chat -
 
 The Telegram step of the setup page has three stages:
 
-1. Create a bot. In Telegram, search for `@BotFather` and open the chat with the blue check mark. The page also links to it. Send `/newbot`, a name, then a user name that ends in `bot`. BotFather answers with a token. Then turn on Threaded Mode: press Open in the chat to start BotFather's app, choose your bot, open Bot Settings, and turn on Threaded Mode.
+1. Create a bot. In Telegram, search for `@BotFather` and open the chat with the blue check mark. The page also links to it. Send `/newbot`, a name, then a user name that ends in `bot`. BotFather answers with a token.
 2. Paste the token. The page stores it in the macOS Keychain and checks the bot with Telegram at once. To store it from a terminal instead: `mission-agent secret set credential:telegram.bot_token --root ~/agents/ada`.
 3. Connect your account. The page shows a link to your bot and a QR code of the same link. Open it on your phone and press Start. The page sees your account and moves on. You can also send the six-digit code that the page shows to your bot.
 
-The agent writes to you in one thread per mission, so the bot needs Threaded Mode (topic mode). When it is still off, the page says so after the bot check. Turn it on in BotFather as in stage 1, then press Check again.
+The agent writes to you in one chat. A message from a mission other than the general mission starts with the mission's name on its own line. The bot needs no Threaded Mode.
+
+How a message finds its mission:
+
+- Send the mission's command to write to it: `/inbox_curator check my mail`. The command is the mission's name with each `-` replaced by `_`. The general mission is `/general`.
+- Send the command alone, such as `/inbox_curator`, and your next messages go to that mission.
+- Reply to a message of a mission, and your reply goes to that mission.
+- Any other message goes to a fast first step, which picks the mission. It answers a simple message, such as a greeting, at once. Otherwise it writes "Working on it." or "Calling inbox-curator." before the mission's answer.
+
+The bot's menu lists the commands. It changes when you add, rename, freeze or delete a mission. `/mission` shows the missions and their commands. While the agent works on your message, Telegram shows that the bot is typing.
 
 The Telegram part has only been tested with a fake Telegram service so far.
 

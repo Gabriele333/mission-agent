@@ -34,14 +34,16 @@ import {
   createTelegramSurface,
   pairTelegramUser,
   TELEGRAM_SURFACE_ID,
+  TELEGRAM_API_VARIABLE,
   TelegramError,
+  testTelegramApiUrl,
   type BotCheck,
   type FetchFn,
   type TelegramSurfaceOptions,
 } from '../surfaces/telegram/index.js';
 import { createTerminalSurface, TERMINAL_SURFACE_ID, type TerminalSurface } from '../surfaces/terminal/index.js';
 import { builtinTools, createCodeCatalog, createToolCatalog } from '../tools/index.js';
-import { createTriage } from '../triage/index.js';
+import { createTriage, menuCommands } from '../triage/index.js';
 import type { ReleaseCheck } from '../update/check.js';
 import { compareVersions, parseVersion } from '../update/version.js';
 import {
@@ -371,9 +373,13 @@ export function createHarness(options: HarnessOptions): Harness {
     return `${agent} · ${registry.get(missionId)?.name ?? missionId}`;
   }
 
-  /** A frozen mission's thread has the word "frozen" in its name (§F.1). */
-  function threadLabel(m: Manifest): string {
-    return m.status === 'frozen' ? `${label(m.id)} (frozen)` : label(m.id);
+  /** The menu of the user's chat on Telegram: the harness commands and one command per mission (§F.1). */
+  function telegramCommands() {
+    const { commands, left } = menuCommands(registry.list());
+    if (left > 0) {
+      log(`Telegram shows at most 100 commands, so ${left === 1 ? 'one mission command is' : `${left} mission commands are`} left out of its menu.`);
+    }
+    return commands;
   }
 
   /** The bot token is shown in the terminal only (§A.5): the log and the terminal surface. */
@@ -409,6 +415,8 @@ export function createHarness(options: HarnessOptions): Harness {
         log(`The details of an approval request could not be built: ${errorText(err)}`);
       }
       shownOn.set(req.id, surface.id);
+      // The run waits for the user now, so the sign that the agent works ends (§F.1).
+      dispatcher.runWaitsForApproval(req.missionId);
       // The details quote the input, so they pass through the redactor too.
       const shown = details === undefined ? req : { ...req, details: safeRedact(details) };
       await surface.showApproval(shown, label(req.missionId));
@@ -573,26 +581,31 @@ export function createHarness(options: HarnessOptions): Harness {
     if (cfg().telegramUserId === undefined || cache.get(TELEGRAM_BOT_TOKEN) === undefined) return;
     authFailures = 0;
     const make = options.createTelegramSurface ?? createTelegramSurface;
-    const surface = make({
+    const surfaceOptions: TelegramSurfaceOptions = {
       token: () => cache.get(TELEGRAM_BOT_TOKEN) ?? '',
       userId: () => cfg().telegramUserId,
       dataDir: (id) => paths.dataDir(id),
       missionName: (id) => registry.get(id)?.name,
       generalMissionId: SYS_GENERAL,
       onError: onTelegramError,
-    });
+      // The surface publishes the menu when it starts, also after a pairing (§F.1).
+      commands: telegramCommands,
+    };
+    const apiBase = telegramApiBase();
+    if (apiBase !== undefined) surfaceOptions.apiBaseUrl = apiBase;
+    const surface = make(surfaceOptions);
     await surface.start(surfaceHost);
     telegram = surface;
     surfaces.add(surface);
-    // Each mission has its own thread. Missions created while Telegram was off get theirs now.
-    for (const m of registry.list()) {
-      if (store.getThread(m.id) !== undefined) continue;
-      try {
-        await surface.createThread?.(m.id, threadLabel(m));
-      } catch (err) {
-        log(`The Telegram thread of ${m.id} could not be created: ${errorText(err)}`);
-      }
-    }
+  }
+
+  /** The test variable that points the bot at a fake Telegram service on this machine (chapter 7.2). */
+  function telegramApiBase(): string | undefined {
+    const given = process.env[TELEGRAM_API_VARIABLE];
+    if (given === undefined || given === '') return undefined;
+    const url = testTelegramApiUrl(given);
+    if (url === undefined) log(`${TELEGRAM_API_VARIABLE} is ignored: it must be http://127.0.0.1:<port>.`);
+    return url;
   }
 
   async function stopTelegram(): Promise<void> {
@@ -645,13 +658,14 @@ export function createHarness(options: HarnessOptions): Harness {
     for (const id of requiredIds()) if (cache.get(id) === undefined) sayMissing(id);
   }
 
-  async function updateThread(m: Manifest): Promise<void> {
-    if (telegram === undefined) return;
-    try {
-      if (store.getThread(m.id) === undefined) await telegram.createThread?.(m.id, threadLabel(m));
-      else await telegram.renameThread?.(m.id, threadLabel(m));
-    } catch (err) {
-      log(`The Telegram thread of ${m.id} could not be updated: ${errorText(err)}`);
+  /** Tells the surfaces that the set of missions changed, so Telegram publishes its menu again (§F.1). */
+  async function missionsChanged(): Promise<void> {
+    for (const surface of surfaces.list()) {
+      try {
+        await surface.missionsChanged?.();
+      } catch (err) {
+        log(`The surface ${surface.id} could not update its list of mission commands: ${errorText(err)}`);
+      }
     }
   }
 
@@ -660,13 +674,6 @@ export function createHarness(options: HarnessOptions): Harness {
     dispatcher.forgetMission(id);
     if (engine.running().includes(id)) await engine.stop(id);
     approvals.cancelForMission(id, 'the mission was deleted');
-    if (telegram !== undefined && store.getThread(id) !== undefined) {
-      try {
-        await telegram.deleteThread?.(id);
-      } catch (err) {
-        log(`The Telegram thread of the deleted mission ${id} could not be deleted: ${errorText(err)}`);
-      }
-    }
     store.deleteMissionState(id);
     for (const prefix of MISSION_STATE_PREFIXES) store.deleteState(prefix + id);
     if (store.getState(STATE_KEYS.currentChatMission) === id) store.deleteState(STATE_KEYS.currentChatMission);
@@ -690,14 +697,15 @@ export function createHarness(options: HarnessOptions): Harness {
   /** Compares the registry with what the harness last saw, and acts on each difference. */
   async function doSync(): Promise<void> {
     const list = registry.list();
+    let changed = false;
     for (const m of list) {
       const prev = known.get(m.id);
       if (prev === undefined) {
-        await updateThread(m);
+        changed = true;
         if (m.status === 'active') await checkMissionCredentials(m);
         continue;
       }
-      if (prev.name !== m.name || prev.status !== m.status) await updateThread(m);
+      if (prev.name !== m.name || prev.status !== m.status || prev.version !== m.version) changed = true;
       if (prev.status === 'active' && m.status === 'frozen') {
         // A frozen mission does not run, so nothing of it may wait for the user (§A.4.3).
         approvals.cancelForMission(m.id, 'the mission was frozen');
@@ -707,11 +715,15 @@ export function createHarness(options: HarnessOptions): Harness {
     }
     const next = snapshot(list);
     for (const id of known.keys()) {
+      if (next.has(id)) continue;
+      // A mission whose manifest became invalid leaves the menu too.
+      changed = true;
       // A manifest that became invalid keeps its folder. Only a removed folder is a deletion.
-      if (!next.has(id) && !existsSync(paths.missionDir(id))) await cleanUp(id);
+      if (!existsSync(paths.missionDir(id))) await cleanUp(id);
     }
     known = next;
     reportManifestErrors();
+    if (changed) await missionsChanged();
   }
 
   function syncMissions(): Promise<void> {
@@ -817,9 +829,6 @@ export function createHarness(options: HarnessOptions): Harness {
     await loadSecrets();
     if (cfg().telegramUserId === undefined) await stopTelegram();
     else await startTelegram();
-    if (before !== undefined && before.agentName !== cfg().agentName && telegram !== undefined) {
-      for (const m of registry.list()) await updateThread(m);
-    }
     if (!hadConfig || dispatcher.pauseRecord().blocker !== undefined) await reevaluateBlocker();
     if (!hadConfig) await checkAllCredentials();
     await scheduler?.refresh();
@@ -1128,7 +1137,7 @@ export function createHarness(options: HarnessOptions): Harness {
   async function checkTelegramBot(): Promise<BotCheck> {
     const token = await currentBotToken();
     if (token === undefined) return { ok: false, reason: noBotToken };
-    return checkBot(token, options.telegramFetch);
+    return checkBot(token, options.telegramFetch, telegramApiBase());
   }
 
   async function pairTelegram(opts: { code: string; timeoutMs: number; signal?: AbortSignal }): Promise<number> {
@@ -1146,6 +1155,7 @@ export function createHarness(options: HarnessOptions): Harness {
         timeoutMs: opts.timeoutMs,
         signal: opts.signal === undefined ? abort.signal : AbortSignal.any([abort.signal, opts.signal]),
         ...(options.telegramFetch !== undefined ? { fetchFn: options.telegramFetch } : {}),
+        ...(telegramApiBase() !== undefined ? { baseUrl: telegramApiBase() as string } : {}),
       });
     } finally {
       if (pairAbort === abort) pairAbort = undefined;

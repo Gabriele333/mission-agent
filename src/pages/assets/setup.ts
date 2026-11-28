@@ -488,7 +488,7 @@ export const SETUP_JS = `'use strict';
     said: '',
   };
 
-  /** Asks the harness to check the bot with Telegram. The answer gives the bot's user name and whether Threaded Mode is on. */
+  /** Asks the harness to check the bot with Telegram. The answer gives the bot's user name. */
   async function checkBot() {
     tg.checking = true;
     tg.tokenError = null;
@@ -497,7 +497,7 @@ export const SETUP_JS = `'use strict';
     tg.checking = false;
     if (r.ok && r.data && r.data.ok) {
       tg.newToken = false;
-      tg.said = 'Bot @' + r.data.username + ' connected.' + (r.data.topicsEnabled ? '' : ' Threaded Mode is off.');
+      tg.said = 'Bot @' + r.data.username + ' connected.';
     } else {
       tg.tokenError = MA.errorText(r);
     }
@@ -535,10 +535,10 @@ export const SETUP_JS = `'use strict';
     await reload();
   }
 
-  /** True when the bot works and Threaded Mode is on, so the account can be connected. */
+  /** True when the bot works, so the account can be connected. */
   function canPair() {
     const t = data.telegram;
-    return t.tokenPresent && !!t.bot && t.bot.topicsEnabled && !tg.newToken && !tg.checking;
+    return t.tokenPresent && !!t.bot && !tg.newToken && !tg.checking;
   }
 
   /** Checks the bot and starts the pairing by themselves, each once, while the Telegram stages show. */
@@ -626,7 +626,6 @@ export const SETUP_JS = `'use strict';
         el('li', { text: 'Send a name for the bot, such as ' + name + '.' }),
         el('li', null, ['Send a user name that ends in ', el('code', { text: 'bot' }), ', such as ', el('code', { text: 'my_agent_bot' }), '.']),
         el('li', { text: 'BotFather answers with a token. Copy it.' }),
-        el('li', { text: 'Turn on Threaded Mode. In the chat with BotFather, press Open to start its app. Choose your bot, open Bot Settings, and turn on Threaded Mode. The agent writes to you in one thread per mission, so it needs this.' }),
       ]),
       el('button', { type: 'button', className: 'secondary', text: 'I have the token', on: { click: function () { tg.haveBot = true; render(); } } }),
     ];
@@ -677,17 +676,6 @@ export const SETUP_JS = `'use strict';
       tg.tokenError ? el('p', { className: 'error', id: 'tg-token-error', attrs: { role: 'alert' }, text: tg.tokenError }) : null,
       quiet.length > 0 ? el('div', { className: 'row stage-actions' }, quiet) : null,
     ];
-  }
-
-  /** The note when Threaded Mode is off. The agent cannot write to the user in Telegram without it. */
-  function topicNote(bot) {
-    const again = el('button', { type: 'button', text: tg.checking ? 'Checking' : 'Check again', disabled: tg.checking, on: { click: checkBot } });
-    return el('div', { className: 'banner warn topic-note', attrs: { role: 'status' } }, [
-      el('p', null, el('strong', { text: 'Turn on Threaded Mode for @' + bot.username + '.' })),
-      el('p', { text: 'Without it, the agent cannot create its threads, so it cannot answer you or ask for approvals in Telegram.' }),
-      el('p', { text: 'In Telegram, search for @BotFather and open the chat. Press Open there to start its app. Choose @' + bot.username + ', open Bot Settings, and turn on Threaded Mode.' }),
-      el('div', { className: 'row' }, [el('a', { className: 'button secondary', href: BOTFATHER, text: 'Open BotFather' }), again]),
-    ]);
   }
 
   /** The QR code of the link, for the camera of a phone. Dark squares on white, with a quiet zone of four squares. */
@@ -748,7 +736,6 @@ export const SETUP_JS = `'use strict';
     const s1 = t.tokenPresent || tg.haveBot;
     const s2 = t.tokenPresent && !!t.bot && !tg.newToken;
     const s3 = t.userId !== null && p.state !== 'waiting';
-    const topicsOff = s2 && !t.bot.topicsEnabled;
     const list = [];
 
     list.push(s1
@@ -756,7 +743,7 @@ export const SETUP_JS = `'use strict';
       : stage(1, 'open', 'Create the bot', createBotItems()));
 
     if (s2) {
-      list.push(stage(2, 'done', 'Bot @' + t.bot.username + ' connected', topicsOff ? [topicNote(t.bot)] : [],
+      list.push(stage(2, 'done', 'Bot @' + t.bot.username + ' connected', [],
         quietButton('Use another bot', function () { tg.newToken = true; tg.tokenError = null; render(); })));
     } else {
       list.push(stage(2, s1 ? 'open' : 'later', 'Paste the token', s1 ? tokenItems() : []));
@@ -766,10 +753,10 @@ export const SETUP_JS = `'use strict';
       list.push(stage(3, 'done', 'Paired with the account ' + t.userId, wizard === null
         ? [el('p', { className: 'help stage-detail', text: 'The bot accepts messages from this account only. ' + (t.surfaceRunning ? 'The agent reads its messages now.' : 'The agent does not read its messages now.') })]
         : []));
-    } else if (s2 && !topicsOff) {
+    } else if (s2) {
       list.push(stage(3, 'open', 'Connect your account', pairItems()));
     } else {
-      list.push(stage(3, 'later', 'Connect your account', topicsOff ? [el('p', { className: 'help stage-detail', text: 'This comes after Threaded Mode is on.' })] : []));
+      list.push(stage(3, 'later', 'Connect your account', []));
     }
 
     const said = tg.said;
@@ -973,7 +960,7 @@ export const SETUP_JS = `'use strict';
       el('p', { text: 'In a terminal on this computer:' }),
       el('pre', { text: data.commands.chat }),
       t.userId !== null
-        ? el('p', { text: 'On Telegram: write to ' + (t.bot ? '@' + t.bot.username : 'your bot') + '. Each mission has its own thread.' })
+        ? el('p', { text: 'On Telegram: write to ' + (t.bot ? '@' + t.bot.username : 'your bot') + '. To write to one mission, send its command, such as /general.' })
         : el('p', { className: 'muted', text: 'Telegram is not set up.' }),
     ]);
   }

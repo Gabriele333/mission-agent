@@ -3,7 +3,17 @@ import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import { describeApproval } from '../../safety/index.js';
 import { TELEGRAM_BOT_TOKEN } from '../../secrets/index.js';
-import type { ApprovalAnswer, ApprovalRequest, IncomingMessage, MissionId, OutgoingMessage, Surface, SurfaceHost } from '../../types.js';
+import type { MenuCommand } from '../../triage/index.js';
+import type {
+  ApprovalAnswer,
+  ApprovalRequest,
+  IncomingMessage,
+  MissionId,
+  OutgoingMessage,
+  Surface,
+  SurfaceHost,
+  WorkingSign,
+} from '../../types.js';
 import {
   backoffMs,
   createTelegramApi,
@@ -16,13 +26,37 @@ import {
   type Timers,
 } from './api.js';
 import { checkOutgoingFile, MAX_DOWNLOAD_BYTES, safeFileName, writeUniqueFile } from './files.js';
-import { appendWithin, CALLBACK_TEXT_LIMIT, CAPTION_LIMIT, MESSAGE_LIMIT, splitText, TOPIC_NAME_LIMIT, truncate } from './text.js';
-import type { TgCallbackQuery, TgFile, TgForumTopic, TgMessage, TgUpdate, TgUser } from './tg-types.js';
+import { appendWithin, CALLBACK_TEXT_LIMIT, CAPTION_LIMIT, MESSAGE_LIMIT, splitText, truncate } from './text.js';
+import type { TgCallbackQuery, TgFile, TgMessage, TgUpdate, TgUser } from './tg-types.js';
 
 export const TELEGRAM_SURFACE_ID = 'surface:telegram';
 
 /** The state key that holds the polling offset: `{"offset": <number>, "savedAt": <ms since 1970>}`. */
 export const OFFSET_STATE_KEY = 'telegram.update_offset';
+
+/**
+ * The state key that holds the thread of the user's last message: its number, or `none` when that
+ * message had no thread. The surface writes there (§F.1). Absent before the first message.
+ */
+export const REPLY_THREAD_STATE_KEY = 'telegram.reply_thread';
+const NO_THREAD = 'none';
+
+/** The state key that is set once the notice about the one chat was sent (§F.1). */
+export const ONE_CHAT_NOTICE_STATE_KEY = 'telegram.one_chat_notice_sent';
+
+/** The notice for an install that used one thread per mission before. It is sent once. */
+export const ONE_CHAT_NOTICE =
+  'Telegram is now one chat with the agent. The old threads keep their messages, but the agent no longer uses them. ' +
+  'The agent answers in the thread you last wrote in. You can turn off Threaded Mode in BotFather: open its app, ' +
+  'choose the bot, and open Bot Settings. To write to one mission, send its command, such as /general. ' +
+  'The menu of the chat lists the commands.';
+
+/** Telegram shows "typing" for 5 seconds, so the surface sends it again after this time. */
+export const TYPING_REPEAT_MS = 4000;
+/** The sign that the agent works never lasts longer than this. */
+export const WORKING_SIGN_MAX_MS = 5 * 60_000;
+/** How many sent messages the surface remembers, to route a reply to the mission that sent it. */
+export const SENT_MESSAGES_KEPT = 300;
 
 /** How long the surface waits for a reason after the reject button (§G). */
 export const REASON_WAIT_MS = 5 * 60_000;
@@ -64,6 +98,11 @@ export interface TelegramSurfaceOptions {
   missionName: (missionId: MissionId) => string | undefined;
   /** The id of the general mission (`sys-general`). */
   generalMissionId: MissionId;
+  /**
+   * The list of commands for the menu of the user's chat (§F.1). The surface publishes it at the
+   * start and on `missionsChanged`. Without it, the surface publishes nothing.
+   */
+  commands?: () => MenuCommand[];
   /** Errors that the surface cannot return to a caller. The message never contains the token. */
   onError: (error: Error) => void;
   fetchFn?: FetchFn;
@@ -112,6 +151,11 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
   const approvals = new Map<string, ShownApproval>();
   const approvalOfMessage = new Map<number, string>();
   const approvalOfKey = new Map<string, string>();
+  /** The mission of each message the surface sent, newest last, for a reply (§B.1). */
+  const missionOfSent = new Map<number, MissionId>();
+  /** The signs that the agent works. While one is open, "typing" is sent every 4 seconds. */
+  const signs = new Set<{ cap: unknown }>();
+  let typingTimer: unknown;
 
   const report = (err: unknown) => {
     if (err instanceof StoppedError) return;
@@ -144,99 +188,193 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     return run;
   }
 
-  // ------------------------------------------------------------ threads
+  // ------------------------------------------------------------ where the agent writes (§F.1)
 
-  function topicName(label: string, missionId: MissionId): string {
-    const name = label.trim() !== '' ? label.trim() : (options.missionName(missionId) ?? missionId);
-    return truncate(name, TOPIC_NAME_LIMIT);
+  /**
+   * The thread of the user's last message, or undefined for none. Before the first message, it is
+   * the general mission's thread of the old layout when one is stored, else none.
+   */
+  function replyThread(): number | undefined {
+    const h = requireHost();
+    const raw = h.store.getState(REPLY_THREAD_STATE_KEY);
+    if (raw === undefined) return h.store.getThread(general);
+    if (raw === NO_THREAD) return undefined;
+    const n = Number(raw);
+    return Number.isSafeInteger(n) && n > 0 ? n : undefined;
   }
 
-  async function createTopic(missionId: MissionId, label: string): Promise<number> {
-    const chatId = requireUser();
-    const topic = await call<TgForumTopic>('createForumTopic', { chat_id: chatId, name: topicName(label, missionId) });
-    requireHost().store.setThread(missionId, topic.message_thread_id);
-    return topic.message_thread_id;
-  }
-
-  /** The stored thread of a mission, created when there is none. Runs inside the chain. */
-  async function ensureThread(missionId: MissionId, label: string): Promise<number> {
-    const stored = requireHost().store.getThread(missionId);
-    if (stored !== undefined) return stored;
-    return createTopic(missionId, label);
+  function rememberThread(threadId: number | undefined): void {
+    requireHost().store.setState(REPLY_THREAD_STATE_KEY, threadId === undefined ? NO_THREAD : String(threadId));
   }
 
   /**
-   * Runs `post` in the mission's thread. When Telegram says the thread does not exist, for example
-   * because the user deleted it, the thread is created again and `post` runs once more.
+   * Runs `post` in the thread where the user last wrote. When Telegram refuses the call (answer
+   * 400), the surface runs `post` once more with no thread. Telegram's documentation does not list
+   * the answers for a thread that is gone or for topic mode that was turned off, so every refusal
+   * is tried again. The thread is forgotten only when the second call works. When it fails too,
+   * the thread was not the cause, and the first error is thrown.
    */
-  async function inThread<T>(missionId: MissionId, label: string, post: (threadId: number) => Promise<T>): Promise<T> {
-    const threadId = await ensureThread(missionId, label);
+  async function inReplyThread<T>(post: (threadId: number | undefined) => Promise<T>): Promise<T> {
+    const threadId = replyThread();
     try {
       return await post(threadId);
     } catch (err) {
-      if (!isThreadMissing(err)) throw err;
-      requireHost().store.deleteThread(missionId);
-      return post(await createTopic(missionId, label));
+      if (threadId === undefined || !isRefused(err)) throw err;
+      let result: T;
+      try {
+        result = await post(undefined);
+      } catch {
+        throw err;
+      }
+      rememberThread(undefined);
+      return result;
     }
   }
 
-  function labelFor(missionId: MissionId | null, given?: string): string {
-    if (missionId === null) return requireHost().label(general);
-    return given ?? requireHost().label(missionId);
+  /** The first line of a message: the mission's name, for every mission except the general mission. */
+  function labelLine(msg: OutgoingMessage): string | undefined {
+    if (msg.missionId === null || msg.missionId === general) return undefined;
+    return options.missionName(msg.missionId) ?? nameFromLabel(msg.label) ?? msg.missionId;
+  }
+
+  function rememberSent(messageId: number, missionId: MissionId): void {
+    missionOfSent.delete(messageId);
+    missionOfSent.set(messageId, missionId);
+    while (missionOfSent.size > SENT_MESSAGES_KEPT) {
+      const oldest = missionOfSent.keys().next().value;
+      if (oldest === undefined) break;
+      missionOfSent.delete(oldest);
+    }
   }
 
   // ------------------------------------------------------------ sending
 
-  async function postText(threadId: number | undefined, text: string, extra: Record<string, unknown> = {}): Promise<TgMessage> {
-    const params: Record<string, unknown> = { chat_id: requireUser(), text, ...extra };
-    if (threadId !== undefined) params.message_thread_id = threadId;
-    return call<TgMessage>('sendMessage', params);
+  async function postText(text: string, extra: Record<string, unknown> = {}): Promise<TgMessage> {
+    return inReplyThread((threadId) => {
+      const params: Record<string, unknown> = { chat_id: requireUser(), text, ...extra };
+      if (threadId !== undefined) params.message_thread_id = threadId;
+      return call<TgMessage>('sendMessage', params);
+    });
   }
 
-  async function postParts(threadId: number, text: string): Promise<void> {
+  async function postParts(text: string, sent: number[]): Promise<void> {
     for (const part of splitText(text, MESSAGE_LIMIT)) {
       // Telegram refuses an empty text, and a part that is only white space counts as empty.
       if (part.trim() === '') continue;
-      await postText(threadId, part);
+      sent.push((await postText(part)).message_id);
     }
   }
 
-  async function postDocument(threadId: number, realPath: string, caption: string): Promise<void> {
+  async function postDocument(realPath: string, caption: string): Promise<number> {
     const data = await readFile(realPath);
-    const form = new FormData();
-    form.append('chat_id', String(requireUser()));
-    form.append('message_thread_id', String(threadId));
-    if (caption !== '') form.append('caption', caption);
-    form.append('document', new Blob([data]), basename(realPath));
-    await call<TgMessage>('sendDocument', form);
+    const message = await inReplyThread((threadId) => {
+      const form = new FormData();
+      form.append('chat_id', String(requireUser()));
+      if (threadId !== undefined) form.append('message_thread_id', String(threadId));
+      if (caption !== '') form.append('caption', caption);
+      form.append('document', new Blob([data]), basename(realPath));
+      return call<TgMessage>('sendDocument', form);
+    });
+    return message.message_id;
   }
 
   async function send(msg: OutgoingMessage): Promise<void> {
     requireHost();
     requireUser();
     const missionId = msg.missionId ?? general;
-    const label = labelFor(msg.missionId, msg.label);
     const hasText = msg.text.trim() !== '';
     if (!hasText && msg.filePath === undefined) return;
     // The file is checked before anything is sent, so a refused file sends nothing.
     const realPath = msg.filePath === undefined ? undefined : await checkOutgoingFile(msg.filePath, options.dataDir(missionId));
-    await enqueue(() =>
-      inThread(missionId, label, async (threadId) => {
-        if (realPath === undefined) return postParts(threadId, msg.text);
-        if (msg.text.length <= CAPTION_LIMIT) return postDocument(threadId, realPath, hasText ? msg.text : '');
-        await postParts(threadId, msg.text);
-        await postDocument(threadId, realPath, '');
-      }),
-    );
+    const name = labelLine(msg);
+    const body = hasText ? msg.text : '';
+    const text = name === undefined ? body : body === '' ? name : `${name}\n${body}`;
+    await enqueue(async () => {
+      const sent: number[] = [];
+      if (realPath === undefined) {
+        await postParts(text, sent);
+      } else if (text.length <= CAPTION_LIMIT) {
+        sent.push(await postDocument(realPath, text));
+      } else {
+        await postParts(text, sent);
+        sent.push(await postDocument(realPath, ''));
+      }
+      if (msg.missionId !== null) for (const id of sent) rememberSent(id, msg.missionId);
+    });
   }
 
-  /** A short note in the thread where the user wrote. Errors are reported, not thrown. */
-  async function note(threadId: number | undefined, text: string): Promise<void> {
+  /** A short note from the surface. Errors are reported, not thrown. */
+  async function note(text: string): Promise<void> {
     try {
-      await enqueue(() => postText(threadId, text));
+      await enqueue(() => postText(text));
     } catch (err) {
       report(err);
     }
+  }
+
+  /** Publishes the list of commands for the user's chat only. A failure is reported and changes nothing else. */
+  async function publishCommands(): Promise<void> {
+    if (options.commands === undefined || controller === undefined || controller.signal.aborted) return;
+    try {
+      const chatId = requireUser();
+      await call('setMyCommands', { commands: options.commands(), scope: { type: 'chat', chat_id: chatId } }, 3);
+    } catch (err) {
+      report(err);
+    }
+  }
+
+  /** Sends the notice about the one chat once, to an install that has threads of the old layout. */
+  async function sendOneChatNotice(): Promise<void> {
+    try {
+      const h = requireHost();
+      if (h.store.getState(ONE_CHAT_NOTICE_STATE_KEY) !== undefined || h.store.countThreads() === 0) return;
+      await enqueue(() => postText(ONE_CHAT_NOTICE));
+      h.store.setState(ONE_CHAT_NOTICE_STATE_KEY, new Date(now()).toISOString());
+    } catch (err) {
+      report(err);
+    }
+  }
+
+  // ------------------------------------------------------------ the sign that the agent works
+
+  function sendTyping(): void {
+    if (controller === undefined || controller.signal.aborted || options.userId() === undefined) return;
+    // Errors of this call are ignored: the sign is not worth a message to the user. A refusal
+    // here is not tried again and never changes the thread that the messages use.
+    const params: Record<string, unknown> = { chat_id: requireUser(), action: 'typing' };
+    const threadId = replyThread();
+    if (threadId !== undefined) params.message_thread_id = threadId;
+    call('sendChatAction', params, 1).catch(() => undefined);
+  }
+
+  function stopTyping(): void {
+    if (typingTimer !== undefined) timers.clearTimer(typingTimer);
+    typingTimer = undefined;
+  }
+
+  function scheduleTyping(): void {
+    stopTyping();
+    typingTimer = timers.setTimer(() => {
+      typingTimer = undefined;
+      if (signs.size === 0) return;
+      sendTyping();
+      scheduleTyping();
+    }, TYPING_REPEAT_MS);
+  }
+
+  function showWorking(): WorkingSign {
+    if (controller === undefined || controller.signal.aborted) return { stop() {} };
+    const sign: { cap: unknown } = { cap: undefined };
+    const stop = () => {
+      if (!signs.delete(sign)) return;
+      timers.clearTimer(sign.cap);
+      if (signs.size === 0) stopTyping();
+    };
+    sign.cap = timers.setTimer(stop, WORKING_SIGN_MAX_MS);
+    signs.add(sign);
+    sendTyping();
+    scheduleTyping();
+    return { stop };
   }
 
   // ------------------------------------------------------------ approvals
@@ -282,26 +420,26 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     return { parts, last };
   }
 
-  async function showApproval(req: ApprovalRequest, label: string): Promise<void> {
+  async function showApproval(req: ApprovalRequest, _label: string): Promise<void> {
     requireHost();
     requireUser();
     const { parts, last } = approvalParts(req);
-    await enqueue(() =>
-      inThread(req.missionId, label, async (threadId) => {
-        for (const part of parts) await postText(threadId, part);
-        const entry: ShownApproval = { id: req.id, missionId: req.missionId, messageId: 0, text: last, state: 'buttons', keys: [] };
-        const markup = keyboard([
-          [
-            { text: 'Approve', data: callbackData('a', entry) },
-            { text: 'Reject', data: callbackData('r', entry) },
-          ],
-        ]);
-        const sent = await postText(threadId, last, { reply_markup: markup });
-        entry.messageId = sent.message_id;
-        approvals.set(entry.id, entry);
-        approvalOfMessage.set(entry.messageId, entry.id);
-      }),
-    );
+    await enqueue(async () => {
+      // A request is a message of its mission, so a reply to it goes to the mission, unless it is the reason (§G).
+      for (const part of parts) rememberSent((await postText(part)).message_id, req.missionId);
+      const entry: ShownApproval = { id: req.id, missionId: req.missionId, messageId: 0, text: last, state: 'buttons', keys: [] };
+      const markup = keyboard([
+        [
+          { text: 'Approve', data: callbackData('a', entry) },
+          { text: 'Reject', data: callbackData('r', entry) },
+        ],
+      ]);
+      const sent = await postText(last, { reply_markup: markup });
+      rememberSent(sent.message_id, req.missionId);
+      entry.messageId = sent.message_id;
+      approvals.set(entry.id, entry);
+      approvalOfMessage.set(entry.messageId, entry.id);
+    });
   }
 
   async function editApproval(entry: ShownApproval, text: string, markup: Record<string, unknown>): Promise<void> {
@@ -435,7 +573,7 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
   }
 
   /** A reply to a request that waits for a reason. It is the reason, never a chat message (§G). */
-  async function takeReason(entry: ShownApproval, text: string, threadId: number | undefined): Promise<void> {
+  async function takeReason(entry: ShownApproval, text: string): Promise<void> {
     if (entry.timer !== undefined) {
       timers.clearTimer(entry.timer);
       entry.timer = undefined;
@@ -444,7 +582,7 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     const answer: ApprovalAnswer = reason === '' ? { kind: 'rejected' } : { kind: 'rejected', reason };
     if (!answerApproval(entry.id, answer)) {
       forget(entry);
-      await note(threadId, 'That request is no longer waiting for an answer, so the reason was not used.');
+      await note('That request is no longer waiting for an answer, so the reason was not used.');
     }
   }
 
@@ -484,19 +622,19 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
   }
 
   /** Saves the file of a message for `saveFiles`. On a failure it tells the user and returns undefined. */
-  async function saveFileOf(message: TgMessage, missionId: MissionId, threadId: number | undefined): Promise<string[] | undefined> {
+  async function saveFileOf(message: TgMessage, missionId: MissionId): Promise<string[] | undefined> {
     let saved: string | { refused: string };
     try {
       saved = await saveFile(message, missionId);
     } catch (err) {
       report(err);
       if (!(err instanceof StoppedError)) {
-        await note(threadId, 'The file could not be saved, so the message was not passed on. Please send it again.');
+        await note('The file could not be saved, so the message was not passed on. Please send it again.');
       }
       return undefined;
     }
     if (typeof saved !== 'string') {
-      await note(threadId, saved.refused);
+      await note(saved.refused);
       return undefined;
     }
     return [saved];
@@ -505,7 +643,8 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
   async function handleMessage(message: TgMessage): Promise<void> {
     if (!isUserMessage(message, options.userId())) return;
     const h = requireHost();
-    const threadId = message.message_thread_id;
+    // The agent writes where the user last wrote: in a thread of the old layout, or outside any (§F.1).
+    rememberThread(message.message_thread_id);
     const text = message.text ?? message.caption ?? '';
 
     const repliedTo = message.reply_to_message?.message_id;
@@ -513,24 +652,23 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
       const id = approvalOfMessage.get(repliedTo);
       const entry = id === undefined ? undefined : approvals.get(id);
       if (entry?.state === 'reason') {
-        await takeReason(entry, text, threadId);
+        await takeReason(entry, text);
         return;
       }
     }
 
-    const threadMission = threadId === undefined ? undefined : h.store.missionOfThread(threadId);
-    // The general thread, a message outside any thread and a thread the harness does not know all
-    // go to triage, so the mission is left unset (§B.1, §B.3).
-    const missionId = threadMission !== undefined && threadMission !== general ? threadMission : undefined;
+    // A reply to a message that a mission sent goes to that mission (§B.1). The thread of a
+    // message no longer says anything about its mission.
+    const missionId = repliedTo === undefined ? undefined : missionOfSent.get(repliedTo);
 
     const hasFile = message.document !== undefined || message.photo !== undefined;
     if (!hasFile && message.text === undefined) {
-      if (UNSUPPORTED_KINDS.some((k) => k in message)) await note(threadId, UNSUPPORTED);
+      if (UNSUPPORTED_KINDS.some((k) => k in message)) await note(UNSUPPORTED);
       // Anything else, such as a service message about a topic, is ignored.
       return;
     }
     if (message.document?.file_size !== undefined && message.document.file_size > MAX_DOWNLOAD_BYTES) {
-      await note(threadId, TOO_LARGE);
+      await note(TOO_LARGE);
       return;
     }
 
@@ -538,7 +676,7 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     if (missionId !== undefined) incoming.missionId = missionId;
     // The harness saves the file only after it has accepted the message, in the data folder of
     // the mission that takes it. A refused message saves nothing.
-    if (hasFile) incoming.saveFiles = (target) => saveFileOf(message, target, threadId);
+    if (hasFile) incoming.saveFiles = (target) => saveFileOf(message, target);
     if (hasFile) {
       // Awaited, so the update counts as handled only after the harness has routed the message
       // and the file is saved or refused. Routing does not include the run. If the surface stops
@@ -570,19 +708,7 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     requireHost().store.setState(OFFSET_STATE_KEY, JSON.stringify({ offset, savedAt: now() }));
   }
 
-  async function checkTopics(stop: AbortSignal): Promise<void> {
-    try {
-      const me = await api.call<{ has_topics_enabled?: boolean }>('getMe', {}, { signal: stop, attempts: 3 });
-      if (me.has_topics_enabled !== true) {
-        report(new Error('Topic mode is off for the Telegram bot, so missions cannot have their own threads. Turn on Threaded Mode in BotFather: open its app, choose the bot, and open Bot Settings.'));
-      }
-    } catch (err) {
-      report(err);
-    }
-  }
-
   async function poll(stop: AbortSignal): Promise<void> {
-    await checkTopics(stop);
     let failures = 0;
     while (!stop.aborted) {
       const offset = readOffset();
@@ -624,7 +750,6 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
 
   return {
     id: TELEGRAM_SURFACE_ID,
-    hasThreads: true,
     credentials: [TELEGRAM_BOT_TOKEN],
 
     async start(h: SurfaceHost) {
@@ -633,6 +758,9 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
       controller = new AbortController();
       const stop = controller.signal;
       loop = poll(stop).catch(report);
+      // Neither of these holds up the polling. Each reports its own errors.
+      void publishCommands();
+      void sendOneChatNotice();
     },
 
     async stop() {
@@ -641,6 +769,9 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
         if (entry.timer !== undefined) timers.clearTimer(entry.timer);
         entry.timer = undefined;
       }
+      for (const sign of [...signs]) timers.clearTimer(sign.cap);
+      signs.clear();
+      stopTyping();
       const running = loop;
       loop = undefined;
       await running;
@@ -649,59 +780,9 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     send,
     showApproval,
     closeApproval,
-
-    async createThread(missionId, label) {
-      requireHost();
-      requireUser();
-      await enqueue(async () => {
-        const stored = requireHost().store.getThread(missionId);
-        if (stored === undefined) {
-          await createTopic(missionId, label);
-          return;
-        }
-        await rename(missionId, stored, label);
-      });
-    },
-
-    async renameThread(missionId, label) {
-      requireHost();
-      requireUser();
-      await enqueue(async () => {
-        const stored = requireHost().store.getThread(missionId);
-        if (stored === undefined) await createTopic(missionId, label);
-        else await rename(missionId, stored, label);
-      });
-    },
-
-    async deleteThread(missionId) {
-      requireHost();
-      await enqueue(async () => {
-        const h = requireHost();
-        const stored = h.store.getThread(missionId);
-        for (const entry of [...approvals.values()]) if (entry.missionId === missionId) forget(entry);
-        if (stored === undefined) return;
-        try {
-          await call('deleteForumTopic', { chat_id: requireUser(), message_thread_id: stored });
-        } catch (err) {
-          // A 400 answer means the thread is gone or cannot be deleted. The stored id is useless either way.
-          if (!(err instanceof TelegramError && err.code === 400)) throw err;
-          report(err);
-        }
-        h.store.deleteThread(missionId);
-      });
-    },
+    missionsChanged: publishCommands,
+    showWorking,
   };
-
-  async function rename(missionId: MissionId, threadId: number, label: string): Promise<void> {
-    try {
-      await call('editForumTopic', { chat_id: requireUser(), message_thread_id: threadId, name: topicName(label, missionId) });
-    } catch (err) {
-      if (isNotModified(err)) return;
-      if (!isThreadMissing(err)) throw err;
-      requireHost().store.deleteThread(missionId);
-      await createTopic(missionId, label);
-    }
-  }
 }
 
 // ------------------------------------------------------------ checks
@@ -724,8 +805,17 @@ function isUser(user: TgUser | undefined, userId: number): boolean {
   return user !== undefined && user.is_bot !== true && user.id === userId;
 }
 
-function isThreadMissing(err: unknown): boolean {
-  return err instanceof TelegramError && err.code === 400 && /thread not found|topic_id_invalid|topic not found/i.test(err.message);
+/** The mission name in a label `<agent name> · <mission name>`. */
+function nameFromLabel(label: string): string | undefined {
+  const at = label.indexOf(' · ');
+  if (at === -1) return undefined;
+  const name = label.slice(at + 3).trim();
+  return name === '' ? undefined : name;
+}
+
+/** True when Telegram refused the call itself (answer 400), as it does for a thread that it does not accept. */
+function isRefused(err: unknown): boolean {
+  return err instanceof TelegramError && err.code === 400;
 }
 
 function isNotModified(err: unknown): boolean {

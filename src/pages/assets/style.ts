@@ -338,9 +338,6 @@ li.stage.open .stage-head { margin-bottom: var(--s3); }
 ol.send-list { margin: var(--s3) 0 var(--s4); padding-left: 1.4em; }
 ol.send-list li { margin: var(--s2) 0; padding-left: var(--s1); }
 ol.send-list button.copy { margin: 0 var(--s2) 0 var(--s2); min-height: 28px; padding: 2px 8px; font-size: 0.85rem; }
-.topic-note { margin: var(--s3) 0 0; }
-.topic-note .row { margin-top: var(--s2); }
-.topic-note .row > * { margin: 0; }
 .telegram .wait .wait-title { margin-bottom: var(--s3); }
 .telegram .wait > button.quiet { margin-left: calc(-1 * var(--s2)); margin-bottom: 0; }
 .telegram + .stage-actions { margin-top: var(--s4); }

@@ -12,7 +12,6 @@ function input(over: Partial<DecideInput>): DecideInput {
     result: { missionId: A, confidence: 0 },
     currentMissionId: A,
     threshold: 0.8,
-    isGeneralThread: false,
     chatMissionIds: [G, A, B],
     ...over,
   };
@@ -58,18 +57,14 @@ describe('decideChatMission', () => {
     });
   });
 
-  it('uses the general mission as the default in the general thread', () => {
-    expect(decideChatMission(input({ isGeneralThread: true, currentMissionId: A, result: { missionId: A, confidence: 0.5 } }))).toMatchObject({
+  it('switches away from the general mission only above the threshold, as for any mission', () => {
+    expect(decideChatMission(input({ currentMissionId: G, result: { missionId: A, confidence: 0.5 } }))).toMatchObject({
       missionId: G,
       switched: false,
     });
-    expect(decideChatMission(input({ isGeneralThread: true, currentMissionId: A, result: { missionId: A, confidence: 0.9 } }))).toMatchObject({
+    expect(decideChatMission(input({ currentMissionId: G, result: { missionId: A, confidence: 0.9 } }))).toMatchObject({
       missionId: A,
       switched: true,
-    });
-    expect(decideChatMission(input({ isGeneralThread: true, result: { missionId: G, confidence: 1 } }))).toMatchObject({
-      missionId: G,
-      switched: false,
     });
   });
 

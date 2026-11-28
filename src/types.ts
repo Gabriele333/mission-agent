@@ -139,7 +139,7 @@ export interface MissionRegistry {
   install(sourceDir: string): Manifest;
   edit(id: MissionId, patch: Partial<ManifestDraft>): Manifest;
   setStatus(id: MissionId, status: MissionStatus): Manifest;
-  /** Removes the mission's folder. The caller removes the session, the approvals and the thread. */
+  /** Removes the mission's folder. The caller removes the session and the approvals. */
   remove(id: MissionId): void;
 }
 
@@ -187,9 +187,9 @@ export interface ToolHost {
   /** Sends a text, and optionally a file from the mission's `data/` folder, to the user (§F.1). */
   sendMessage(missionId: MissionId, text: string, filePath?: string): Promise<void>;
   registry: MissionRegistry;
-  /** Removes what belongs to a deleted mission outside its folder: session, approvals, thread. */
+  /** Removes what belongs to a deleted mission outside its folder: session, approvals, queued work. */
   cleanUpDeletedMission(id: MissionId): Promise<void>;
-  /** Called after a mission is created, renamed, frozen or unfrozen, so that surfaces update threads. */
+  /** Called after a mission is created, renamed, frozen or unfrozen, so that surfaces update their list of mission commands. */
   missionChanged(id: MissionId): Promise<void>;
 }
 
@@ -396,11 +396,13 @@ export interface Store {
   addNotice(missionId: MissionId, text: string): void;
   takeNotices(missionId: MissionId): string[];
 
-  // Telegram thread of each mission (§F.1)
+  // The Telegram thread of each mission, kept from version 0.2.0 and no longer written (§F.1)
   getThread(missionId: MissionId): number | undefined;
   setThread(missionId: MissionId, threadId: number): void;
   deleteThread(missionId: MissionId): void;
   missionOfThread(threadId: number): MissionId | undefined;
+  /** The number of stored threads. */
+  countThreads(): number;
 
   // small values: `paused`, `current_chat_mission`, `last_stopped_at`, crash times and so on
   getState(key: string): string | undefined;
@@ -433,7 +435,7 @@ export interface IncomingMessage {
   /** `surface:terminal` or `surface:telegram`. */
   surface: string;
   text: string;
-  /** Set when the surface knows the mission, as in a Telegram thread of a mission. */
+  /** Set when the surface knows the mission, as for a Telegram reply to a message that a mission sent (§B.1). */
   missionId?: MissionId;
   /** Paths of files that the user sent, already saved by the surface in a temporary place. */
   files?: string[];
@@ -471,11 +473,15 @@ export interface SurfaceHost {
   store: Store;
 }
 
+/** Shows the user that the agent works on a message, until `stop` (§F.1). */
+export interface WorkingSign {
+  stop(): void;
+}
+
 /** One way to talk to the user. A surface is not a tool and not an MCP server (§F.1). */
 export interface Surface {
   /** `surface:<name>`. */
   id: string;
-  hasThreads: boolean;
   /** Credential ids that the surface needs. */
   credentials: string[];
   start(host: SurfaceHost): Promise<void>;
@@ -485,21 +491,46 @@ export interface Surface {
   showApproval(req: ApprovalRequest, label: string): Promise<void>;
   /** Tells the surface that a request is closed, so it can remove the buttons. */
   closeApproval(id: string, outcome: string): Promise<void>;
-  /** Only for a surface with threads. */
-  createThread?(missionId: MissionId, label: string): Promise<void>;
-  renameThread?(missionId: MissionId, label: string): Promise<void>;
-  deleteThread?(missionId: MissionId): Promise<void>;
+  /**
+   * The set of missions changed: one was created, renamed, frozen, made active again or deleted,
+   * or its manifest changed. Telegram publishes its list of commands again. Optional.
+   */
+  missionsChanged?(): Promise<void>;
+  /** Shows that the agent works, until the sign is stopped. Optional; errors are ignored. */
+  showWorking?(): WorkingSign;
 }
 
 // ---------------------------------------------------------------- triage (§B.3)
+
+/** One line of the chat, for the fast first step only (§B.3). */
+export interface RecentLine {
+  /** `user`, or the name of the mission that wrote the line. */
+  speaker: string;
+  text: string;
+}
+
+export interface TriageInput {
+  /** The user's message. */
+  text: string;
+  /** The active missions that list `trigger:chat`. */
+  candidates: Pick<Manifest, 'id' | 'name' | 'description'>[];
+  /** The name of the mission that spoke last: the current mission. */
+  lastMission: string;
+  /** The last lines of the chat, oldest first. */
+  recent: RecentLine[];
+}
 
 export interface TriageResult {
   missionId: MissionId;
   /** Between 0 and 1. */
   confidence: number;
+  /** A short answer to send at once. Set only when the classifier picked the general mission. */
+  answer?: string;
+  /** True when the model call failed, timed out or gave an answer that could not be read. */
+  failed?: true;
 }
 
 export interface Triage {
-  /** Picks a mission among the active missions that list `trigger:chat`. */
-  classify(text: string, candidates: Pick<Manifest, 'id' | 'name' | 'description'>[]): Promise<TriageResult>;
+  /** Picks a mission among the candidates and, sometimes, answers the message itself (§B.3). */
+  classify(input: TriageInput): Promise<TriageResult>;
 }

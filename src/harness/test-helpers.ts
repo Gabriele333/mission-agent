@@ -15,6 +15,7 @@ import {
   type Store,
   type Surface,
   type SurfaceHost,
+  type TriageInput,
   type TriageResult,
   type TriggerEvent,
 } from '../types.js';
@@ -105,21 +106,24 @@ export interface FakeSurface extends Surface {
   sent: OutgoingMessage[];
   shown: ApprovalRequest[];
   closed: { id: string; outcome: string }[];
-  threads: { op: 'create' | 'rename' | 'delete'; missionId: MissionId; label?: string }[];
+  /** How often the harness said that the set of missions changed. */
+  changes: number;
+  /** Every sign that the agent works, in order. `open` is false once it was stopped. */
+  signs: { open: boolean; startedAfter: number }[];
   host?: SurfaceHost;
   texts(): string[];
 }
 
-export function fakeSurface(id: string, hasThreads: boolean): FakeSurface {
-  let nextThread = 100;
+/** A surface for tests. `full` gives it the two optional operations, as Telegram has them. */
+export function fakeSurface(id: string, full: boolean): FakeSurface {
   const s: FakeSurface = {
     id,
-    hasThreads,
     credentials: [],
     sent: [],
     shown: [],
     closed: [],
-    threads: [],
+    changes: 0,
+    signs: [],
     texts: () => s.sent.map((m) => m.text),
     async start(host) {
       s.host = host;
@@ -135,17 +139,18 @@ export function fakeSurface(id: string, hasThreads: boolean): FakeSurface {
       s.closed.push({ id: reqId, outcome });
     },
   };
-  if (hasThreads) {
-    s.createThread = async (missionId, label) => {
-      s.threads.push({ op: 'create', missionId, label });
-      if (s.host?.store.getThread(missionId) === undefined) s.host?.store.setThread(missionId, nextThread++);
+  if (full) {
+    s.missionsChanged = async () => {
+      s.changes += 1;
     };
-    s.renameThread = async (missionId, label) => {
-      s.threads.push({ op: 'rename', missionId, label });
-    };
-    s.deleteThread = async (missionId) => {
-      s.threads.push({ op: 'delete', missionId });
-      s.host?.store.deleteThread(missionId);
+    s.showWorking = () => {
+      const sign = { open: true, startedAfter: s.sent.length };
+      s.signs.push(sign);
+      return {
+        stop() {
+          sign.open = false;
+        },
+      };
     };
   }
   return s;
@@ -164,7 +169,9 @@ export interface DispatcherRig {
   telegram: FakeSurface;
   config: AgentConfig;
   /** What the classifier answers. Default: the general mission with confidence 0. */
-  classify: (text: string) => TriageResult;
+  classify: (text: string, input: TriageInput) => TriageResult | Promise<TriageResult>;
+  /** Every input the classifier received. */
+  triageInputs: TriageInput[];
   pending: ApprovalRequest[];
   cancelled: { missionId: MissionId; reason: string }[];
   clock: { now: Date };
@@ -205,6 +212,7 @@ export function dispatcherRig(options: { defaultSurface?: 'terminal' | 'telegram
     telegram,
     config,
     classify: () => ({ missionId: SYS_GENERAL, confidence: 0 }),
+    triageInputs: [],
     pending: [],
     cancelled: [],
     clock: { now: new Date(2026, 10, 25, 10, 0, 0) },
@@ -254,7 +262,12 @@ export function dispatcherRig(options: { defaultSurface?: 'terminal' | 'telegram
           rig.pending = rig.pending.filter((r) => r.missionId !== missionId);
         },
       },
-      triage: { classify: async (text) => rig.classify(text) },
+      triage: {
+        classify: async (input) => {
+          rig.triageInputs.push(structuredClone(input));
+          return rig.classify(input.text, input);
+        },
+      },
       config: () => config,
       surfaces,
       label: host.label,

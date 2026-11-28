@@ -48,7 +48,7 @@ const FALLBACK_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
  * touches none of them (chapter 7.2). The service file records the ones that are set, so the
  * harness that launchd starts uses the same ones.
  */
-export const TEST_VARIABLES = ['MISSION_AGENT_LAUNCH_AGENTS', 'MISSION_AGENT_KEYCHAIN_SERVICE'] as const;
+export const TEST_VARIABLES = ['MISSION_AGENT_LAUNCH_AGENTS', 'MISSION_AGENT_KEYCHAIN_SERVICE', 'MISSION_AGENT_TELEGRAM_API'] as const;
 
 /** `MISSION_AGENT_LAUNCH_AGENTS`, else `~/Library/LaunchAgents`. */
 export function defaultLaunchAgentsDir(env: NodeJS.ProcessEnv = process.env): string {

@@ -1,6 +1,6 @@
 /**
  * The parts of the Bot API objects that the surface reads. Field names follow
- * https://core.telegram.org/bots/api (Update, Message, CallbackQuery, ForumTopic, File).
+ * https://core.telegram.org/bots/api (Update, Message, CallbackQuery, File).
  */
 
 export interface TgUser {
@@ -61,11 +61,6 @@ export interface TgUpdate {
   callback_query?: TgCallbackQuery;
 }
 
-export interface TgForumTopic {
-  message_thread_id: number;
-  name: string;
-}
-
 export interface TgFile {
   file_id: string;
   file_size?: number;
@@ -78,5 +73,4 @@ export interface TgBotInfo {
   is_bot: boolean;
   first_name: string;
   username?: string;
-  has_topics_enabled?: boolean;
 }

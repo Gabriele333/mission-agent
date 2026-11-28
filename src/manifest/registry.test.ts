@@ -348,6 +348,15 @@ describe('create', () => {
     expect(() => registry.create(draft({ name: 'sys-general' }))).toThrow(ManifestValidationError);
   });
 
+  it('refuses a name that cannot be a chat command, with a clear message', () => {
+    const long = 'a'.repeat(33);
+    expect(() => registry.create(draft({ name: long }))).toThrow(/would have 33 characters.*at most 32 characters/);
+    for (const name of ['mission', 'stop', 'pause', 'resume', 'improve', 'start', 'general', 'mission-admin', 'self-improve']) {
+      expect(() => registry.create(draft({ name })), name).toThrow(/command/);
+    }
+    expect(registry.create(draft({ name: 'a'.repeat(32) })).name).toBe('a'.repeat(32));
+  });
+
   it('rejects unknown fields given at run time', () => {
     const bad = { ...draft(), owner: 'me' } as ManifestDraft;
     expect(() => registry.create(bad)).toThrow(/Unknown key "owner"/);
@@ -401,6 +410,17 @@ describe('edit and setStatus', () => {
     expect(() => registry.edit(a.id, { name: 'other' })).toThrow(/already used/);
   });
 
+  it('refuses a rename to a name that cannot be a chat command, but keeps such a name on other edits', () => {
+    const a = registry.create(draft());
+    expect(() => registry.edit(a.id, { name: 'b'.repeat(33) })).toThrow(/at most 32/);
+    expect(() => registry.edit(a.id, { name: 'pause' })).toThrow(/command/);
+    // A mission whose name came from disk keeps it when another field changes.
+    const id = 'm_2vx8qm4rt6pc';
+    writeMission(id, EXAMPLE_YAML.replace('name: inbox-curator', `name: ${'c'.repeat(40)}`).replace(EXAMPLE_ID, id));
+    registry.reload();
+    expect(registry.edit(id, { description: 'A new description' }).name).toBe('c'.repeat(40));
+  });
+
   it('throws MissionNotFoundError for an unknown or invalid mission', () => {
     expect(() => registry.edit('m_2vx8qm4rt6pc', { description: 'x' })).toThrow(MissionNotFoundError);
     writeMission(EXAMPLE_ID, EXAMPLE_YAML.replace('tool:calendar', 'tool:fax'));
@@ -428,6 +448,18 @@ describe('remove', () => {
   it('refuses an id that is not a mission id', () => {
     expect(() => registry.remove('../state')).toThrow(MissionNotFoundError);
     expect(existsSync(paths.stateDir)).toBe(true);
+  });
+});
+
+describe('names on disk that cannot be chat commands', () => {
+  it('still load: a name of 40 characters and one that clashes with a command', () => {
+    writeMission(EXAMPLE_ID, EXAMPLE_YAML.replace('name: inbox-curator', `name: ${'d'.repeat(40)}`));
+    const other = 'm_2vx8qm4rt6pc';
+    writeMission(other, EXAMPLE_YAML.replace('name: inbox-curator', 'name: stop').replace(EXAMPLE_ID, other));
+    registry.reload();
+    expect(registry.get(EXAMPLE_ID)?.name).toBe('d'.repeat(40));
+    expect(registry.get(other)?.name).toBe('stop');
+    expect(registry.errors()).toEqual([]);
   });
 });
 

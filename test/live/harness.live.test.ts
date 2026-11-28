@@ -149,7 +149,8 @@ describe('the harness with the real model', () => {
     await say(`/mission ${NEW_MISSION}`);
     await next(from, (e) => isText(e) && e.data.text === `The current mission is now ${NEW_MISSION}.`, 'the switch');
     from = events().length;
-    await say('Say hello.');
+    // A greeting could get a direct answer of the general mission (§B.3), so the message is a task of the mission.
+    await say('Write a short note about tea.');
     const reply = await next(from, (e) => e.event === 'message' && e.data.missionId === newId, 'the answer of the new mission');
     expect(reply.data.label).toBe(`Ada · ${NEW_MISSION}`);
     expect((reply.data.text ?? '').length).toBeGreaterThan(0);

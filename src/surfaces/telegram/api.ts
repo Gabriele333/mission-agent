@@ -84,6 +84,20 @@ export function sleep(ms: number, timers: Timers, signal?: AbortSignal): Promise
   });
 }
 
+/**
+ * A test variable: the address of a fake Telegram service on this machine, such as
+ * `http://127.0.0.1:8081`. The harness sends every call of the bot there instead (chapter 7.2).
+ */
+export const TELEGRAM_API_VARIABLE = 'MISSION_AGENT_TELEGRAM_API';
+
+/** The address of the test variable when it is `http://127.0.0.1:<port>`, else undefined. Nothing else is accepted. */
+export function testTelegramApiUrl(value: string): string | undefined {
+  const match = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/.exec(value.trim());
+  if (match === null) return undefined;
+  const port = Number(match[1]);
+  return port >= 1 && port <= 65535 ? `http://127.0.0.1:${port}` : undefined;
+}
+
 export interface ApiOptions {
   token: () => string;
   fetchFn?: FetchFn;

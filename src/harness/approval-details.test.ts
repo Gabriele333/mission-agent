@@ -72,7 +72,6 @@ describe('approval details (§4.2, §4.2.1)', () => {
     writeFileSync(join(h.paths.memoryDir(id), 'note.md'), 'a note');
     writeFileSync(join(h.paths.dataDir(id), 'report.pdf'), 'x');
     store.setSession(id, 'sess');
-    store.setThread(id, 7);
     store.enqueueEvent(id, { triggerId: 'trigger:cron', key: 'k', time: '2026-11-25T10:00:00.000Z', summary: 's', data: {} });
     ctx.pendingApprovals = () => [{ ...req('action:email.send', {}), missionId: id }];
     const text = (await approvalDetails(req('action:registry.delete', { mission: id }), ctx)) ?? '';
@@ -82,7 +81,7 @@ describe('approval details (§4.2, §4.2.1)', () => {
     expect(text).toContain('its session: the whole conversation');
     expect(text).toContain('its waiting approvals: 1');
     expect(text).toContain('its queued events: 1');
-    expect(text).toContain('its Telegram thread with the messages in it: yes');
+    expect(text).not.toContain('Telegram thread');
     expect(text).toContain('It keeps the logbook rows');
   });
 

@@ -27,6 +27,7 @@ import type {
 } from '../types.js';
 import { CODE_ONLY_SYSTEM_IDS, generateMissionId, isSystemMissionId, MISSION_ID_RE } from './ids.js';
 import { checkManifestData, parseManifestText } from './schema.js';
+import { commandProblem } from '../triage/mission-commands.js';
 import { validateManifest } from './validate.js';
 import { bumpVersionText, manifestToPlain, serializeManifest, updateManifestText } from './yaml-write.js';
 
@@ -273,14 +274,20 @@ export function createMissionRegistry(options: MissionRegistryOptions): Watching
     throw new MissionNotFoundError(`There is no mission with id ${id}.`);
   }
 
-  /** Validates a full manifest for a write. Throws a ManifestValidationError and writes nothing. */
-  function checkForWrite(data: Record<string, unknown>, selfId: MissionId | undefined): Manifest {
+  /**
+   * Validates a full manifest for a write. Throws a ManifestValidationError and writes nothing.
+   * A new name must also give a chat command (§B.1). Loading a manifest from its file does not
+   * check that, so an agent whose mission has a longer or clashing name still starts.
+   */
+  function checkForWrite(data: Record<string, unknown>, selfId: MissionId | undefined, newName: boolean): Manifest {
     const { manifest, problems } = check(data);
     if (manifest === undefined) throw new ManifestValidationError(problems);
     const owner = nameUser(manifest.name, selfId);
     if (owner !== undefined) {
       throw new ManifestValidationError([`name "${manifest.name}" is already used by mission ${owner.id}.`]);
     }
+    const commandIssue = newName ? commandProblem(manifest.name) : undefined;
+    if (commandIssue !== undefined) throw new ManifestValidationError([commandIssue]);
     return manifest;
   }
 
@@ -293,7 +300,7 @@ export function createMissionRegistry(options: MissionRegistryOptions): Watching
     reload();
     let id = generateMissionId();
     while (existsSync(paths.missionDir(id)) || valid.has(id)) id = generateMissionId();
-    const manifest = checkForWrite({ ...draft, id, version: 1, status: draft.status ?? 'active' }, undefined);
+    const manifest = checkForWrite({ ...draft, id, version: 1, status: draft.status ?? 'active' }, undefined, true);
     mkdirSync(paths.memoryDir(id), { recursive: true });
     mkdirSync(paths.dataDir(id), { recursive: true });
     mkdirSync(paths.skillsDir(id), { recursive: true });
@@ -326,7 +333,7 @@ export function createMissionRegistry(options: MissionRegistryOptions): Watching
     if (parsed.manifest.gates.some((g) => g.use === 'gate:allow')) {
       throw new ManifestValidationError(['A mission that is added with its files must have no gate:allow.']);
     }
-    const manifest = checkForWrite(manifestToPlain(parsed.manifest), undefined);
+    const manifest = checkForWrite(manifestToPlain(parsed.manifest), undefined, true);
     mkdirSync(paths.memoryDir(id), { recursive: true });
     mkdirSync(paths.dataDir(id), { recursive: true });
     mkdirSync(paths.skillsDir(id), { recursive: true });
@@ -353,7 +360,7 @@ export function createMissionRegistry(options: MissionRegistryOptions): Watching
       if (value === undefined) delete data[key];
       else data[key] = value;
     }
-    const next = checkForWrite(data, id);
+    const next = checkForWrite(data, id, data.name !== current.name);
     if (isDeepStrictEqual(manifestToPlain(next), manifestToPlain(current))) return structuredClone(current);
     next.version = current.version + 1;
     writeManifest(next, updateManifestText(fileTexts.get(id), next));

@@ -39,14 +39,12 @@ function postJson(h: Harness, path: string, body: unknown) {
 const msg = (text: string) => ({ missionId: 'm_k7q3zp2xw9ha', label: 'Ada · inbox-curator', text });
 
 describe('terminal surface', () => {
-  it('declares its id, no threads and no credentials', () => {
+  it('declares its id and no credentials, and has no menu of commands and no sign that the agent works', () => {
     const s = createTerminalSurface({ server: { route: () => {} } });
     expect(s.id).toBe('surface:terminal');
-    expect(s.hasThreads).toBe(false);
     expect(s.credentials).toEqual([]);
-    expect(s.createThread).toBeUndefined();
-    expect(s.renameThread).toBeUndefined();
-    expect(s.deleteThread).toBeUndefined();
+    expect(s.missionsChanged).toBeUndefined();
+    expect(s.showWorking).toBeUndefined();
   });
 
   it('delivers each message to every connected chat program', async () => {

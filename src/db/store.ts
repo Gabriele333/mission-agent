@@ -181,6 +181,7 @@ function storeOn(db: DatabaseSync): Store {
   const threadSet = db.prepare('INSERT OR REPLACE INTO threads (mission_id, thread_id) VALUES (?, ?)');
   const threadDelete = db.prepare('DELETE FROM threads WHERE mission_id = ?');
   const threadMission = db.prepare('SELECT mission_id FROM threads WHERE thread_id = ?');
+  const threadCount = db.prepare('SELECT COUNT(*) AS n FROM threads');
 
   const stateSet = db.prepare(
     'INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
@@ -282,6 +283,9 @@ function storeOn(db: DatabaseSync): Store {
     missionOfThread(threadId) {
       const row = threadMission.get(threadId);
       return row === undefined ? undefined : text(row.mission_id);
+    },
+    countThreads() {
+      return num(threadCount.get()?.n ?? 0);
     },
 
     setState(key, value) {

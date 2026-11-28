@@ -302,6 +302,16 @@ describe('threads', () => {
     expect(s.missionOfThread(9)).toBeUndefined();
   });
 
+  it('counts the stored threads', () => {
+    const s = track(createMemoryStore());
+    expect(s.countThreads()).toBe(0);
+    s.setThread(A, 7);
+    s.setThread(B, 8);
+    expect(s.countThreads()).toBe(2);
+    s.deleteThread(A);
+    expect(s.countThreads()).toBe(1);
+  });
+
   it('gives a thread id to one mission only', () => {
     const s = track(createMemoryStore());
     s.setThread(A, 7);

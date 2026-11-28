@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { terminalClaudeCommand } from '../run/index.js';
 import { MODEL_API_KEY, TELEGRAM_BOT_TOKEN } from '../secrets/index.js';
 import { textUpdate, USER } from '../surfaces/telegram/test-helpers.js';
-import { SYS_GENERAL, SYS_MISSION_ADMIN } from '../types.js';
+import { SYS_GENERAL } from '../types.js';
 import { qrEncode } from './qr.js';
 import { pairLink } from './setup-routes.js';
 import { collectEvents } from '../server/test-helpers.js';
@@ -413,20 +413,20 @@ describe('the terminal chat after the first setup', () => {
 });
 
 describe('Telegram (§5.1 step 3)', () => {
-  it('checks the bot and says whether topic mode is on', async () => {
+  it('checks the bot and gives its user name, whatever topic mode is', async () => {
     const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
     expect(await r.json(await r.post('/api/setup/telegram/check'))).toMatchObject({ ok: false, error: expect.stringContaining('No bot token') });
     await r.post('/api/setup/secret', { id: TELEGRAM_BOT_TOKEN, value: BOT_TOKEN });
-    expect(await r.json(await r.post('/api/setup/telegram/check'))).toEqual({ ok: true, username: 'ada_bot', topicsEnabled: true });
-    r.telegram.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', username: 'ada_bot' } }));
-    expect(await r.json(await r.post('/api/setup/telegram/check'))).toEqual({ ok: true, username: 'ada_bot', topicsEnabled: false });
+    expect(await r.json(await r.post('/api/setup/telegram/check'))).toEqual({ ok: true, username: 'ada_bot' });
+    r.telegram.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', username: 'ada_bot', has_topics_enabled: false } }));
+    expect(await r.json(await r.post('/api/setup/telegram/check'))).toEqual({ ok: true, username: 'ada_bot' });
     r.telegram.script('getMe', () => ({ ok: false, error_code: 401, description: 'Unauthorized' }));
     const refused = await r.json<{ ok: boolean; error: string }>(await r.post('/api/setup/telegram/check'));
     expect(refused.ok).toBe(false);
     expect(refused.error).toContain('refused the bot token');
   });
 
-  it('pairs the sender of the code, records it as telegram_user_id, and starts Telegram with the threads', async () => {
+  it('pairs the sender of the code, records it as telegram_user_id, and starts Telegram with the menu of commands', async () => {
     const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n' });
     expect((await r.post('/api/setup/telegram/pair')).status).toBe(409);
     await r.post('/api/setup/secret', { id: TELEGRAM_BOT_TOKEN, value: BOT_TOKEN });
@@ -444,8 +444,17 @@ describe('Telegram (§5.1 step 3)', () => {
     expect(agentFile(r)).toContain(`telegram_user_id: ${USER}`);
     expect(agentFile(r)).toContain('default_surface: telegram');
     await until(() => r.harness.telegram.running(), 'the Telegram surface to start');
-    const created = r.surface.threads.filter((t) => t.op === 'create').map((t) => t.missionId);
-    expect(created.sort()).toEqual([SYS_GENERAL, SYS_MISSION_ADMIN].sort());
+    // The surface that starts after the pairing gets the menu, and publishes it when it starts. No thread is created.
+    expect(r.surfaceOptions.at(-1)?.commands?.().map((c) => c.command)).toEqual([
+      'mission',
+      'stop',
+      'pause',
+      'resume',
+      'general',
+      'mission_admin',
+    ]);
+    expect(r.surface.host).toBeDefined();
+    expect(r.harness.store.countThreads()).toBe(0);
 
     // The account can be removed again. The terminal becomes the default surface.
     expect((await r.post('/api/setup/telegram/forget')).status).toBe(200);

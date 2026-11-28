@@ -126,3 +126,26 @@ describe('Telegram API client', () => {
     await expect(api.download('documents/none.bin', 10, { attempts: 1 })).rejects.toMatchObject({ code: 404 });
   });
 });
+
+describe('testTelegramApiUrl', () => {
+  it('accepts http://127.0.0.1:<port> only', async () => {
+    const { testTelegramApiUrl, TELEGRAM_API_VARIABLE } = await import('./api.js');
+    expect(TELEGRAM_API_VARIABLE).toBe('MISSION_AGENT_TELEGRAM_API');
+    expect(testTelegramApiUrl('http://127.0.0.1:8081')).toBe('http://127.0.0.1:8081');
+    expect(testTelegramApiUrl(' http://127.0.0.1:65535 ')).toBe('http://127.0.0.1:65535');
+    for (const bad of [
+      'http://127.0.0.1:0',
+      'http://127.0.0.1:65536',
+      'http://127.0.0.1',
+      'http://127.0.0.1:8081/',
+      'https://127.0.0.1:8081',
+      'http://localhost:8081',
+      'http://127.0.0.2:8081',
+      'http://127.0.0.1:8081@evil.example',
+      'https://api.telegram.org',
+      '',
+    ]) {
+      expect(testTelegramApiUrl(bad)).toBeUndefined();
+    }
+  });
+});

@@ -82,7 +82,7 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
   let lastLoginCheck: LoginCheck | undefined;
   // The end time of the last sign-in that the page saw finish well.
   let signInSeen: string | undefined;
-  let bot: { username: string; topicsEnabled: boolean } | undefined;
+  let bot: { username: string } | undefined;
   const serviceOptions = (): ServiceOptions => ({ ...options.service, root: paths.root });
   // The QR code of the last pairing link, made once per link.
   let qrOf: { link: string; rows: string[] } | undefined;
@@ -269,7 +269,7 @@ export function setupRoutes(h: Harness, options: SetupOptions): PageRoute[] {
       bot = undefined;
       return res.json({ ok: false, error: h.redact(check.reason) });
     }
-    bot = { username: check.username, topicsEnabled: check.topicsEnabled };
+    bot = { username: check.username };
     res.json({ ok: true, ...bot });
   };
 

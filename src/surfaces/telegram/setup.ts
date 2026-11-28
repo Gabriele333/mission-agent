@@ -3,16 +3,17 @@ import type { TgBotInfo, TgUpdate } from './tg-types.js';
 
 /** Helpers for the setup page (§5.1 step 3). */
 
-export type BotCheck = { ok: true; username: string; topicsEnabled: boolean } | { ok: false; reason: string };
+export type BotCheck = { ok: true; username: string } | { ok: false; reason: string };
 
-/** Asks Telegram about the bot with `getMe`, so the setup page can say when topic mode is off. */
-export async function checkBot(token: string, fetchFn?: FetchFn): Promise<BotCheck> {
+/** Asks Telegram about the bot with `getMe`, so the setup page can show the bot's user name. */
+export async function checkBot(token: string, fetchFn?: FetchFn, baseUrl?: string): Promise<BotCheck> {
   const opts: Parameters<typeof createTelegramApi>[0] = { token: () => token };
   if (fetchFn) opts.fetchFn = fetchFn;
+  if (baseUrl) opts.baseUrl = baseUrl;
   const api = createTelegramApi(opts);
   try {
     const me = await api.call<TgBotInfo>('getMe', {}, { attempts: 1, timeoutMs: 15_000 });
-    return { ok: true, username: me.username ?? '', topicsEnabled: me.has_topics_enabled === true };
+    return { ok: true, username: me.username ?? '' };
   } catch (err) {
     if (err instanceof TelegramError && (err.code === 401 || err.code === 404)) {
       return { ok: false, reason: 'Telegram refused the bot token. Copy the token from BotFather again.' };
@@ -33,6 +34,8 @@ export interface PairOptions {
   /** How long to wait for the message. */
   timeoutMs: number;
   fetchFn?: FetchFn;
+  /** Default `https://api.telegram.org`. */
+  baseUrl?: string;
   /** Ends the wait early. The promise then rejects. */
   signal?: AbortSignal;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -63,6 +66,7 @@ export async function pairTelegramUser(options: PairOptions): Promise<number> {
   const now = options.now ?? Date.now;
   const apiOpts: Parameters<typeof createTelegramApi>[0] = { token: () => options.token, timers };
   if (options.fetchFn) apiOpts.fetchFn = options.fetchFn;
+  if (options.baseUrl) apiOpts.baseUrl = options.baseUrl;
   const api = createTelegramApi(apiOpts);
   const deadline = now() + options.timeoutMs;
   let offset: number | undefined;

@@ -273,8 +273,12 @@ describe('the Telegram part of the setup page script', () => {
     expect(page.text()).toContain('In Telegram, search for @BotFather and open the chat with the blue check mark.');
     expect(page.text()).toContain('Send /newbot.');
     expect(page.text()).toContain('Send a user name that ends in bot');
-    // The last step of the list says how to turn on Threaded Mode, before the bot check can find it off.
-    expect(page.text()).toContain('press Open to start its app. Choose your bot, open Bot Settings, and turn on Threaded Mode.');
+    // The list ends with the token. The agent writes in one chat, so the bot needs no Threaded Mode.
+    expect(page.text()).toContain('BotFather answers with a token. Copy it.');
+    expect(page.text()).not.toContain('Threaded Mode');
+    const steps = page.find((n) => n.tagName === 'OL' && n.className === 'send-list');
+    expect(steps?.children.filter((n) => n.tagName === 'LI')).toHaveLength(5);
+    expect(steps?.children.at(-1)?.textContent).toBe('BotFather answers with a token. Copy it.');
     expect(page.find((n) => n.id === 'secret-credential-telegram-bot-token')).toBeUndefined();
     expect(page.text()).not.toContain('Connect your account'.concat('Telegram opens'));
 
@@ -326,27 +330,16 @@ describe('the Telegram part of the setup page script', () => {
     expect(everything(page)).not.toContain(BOT_TOKEN);
   });
 
-  it('says when Threaded Mode is off, holds the pairing back, and checks again', async () => {
+  it('pairs at once, whether or not Threaded Mode is on for the bot', async () => {
     const r = await rig({ agentYaml: 'agent_name: Ada\nmodel_login: subscription\n', secrets: { [TELEGRAM_BOT_TOKEN]: BOT_TOKEN } });
-    r.telegram.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', username: 'ada_bot' } }));
+    r.telegram.script('getMe', () => ({ ok: true, result: { id: 1, is_bot: true, first_name: 'A', username: 'ada_bot', has_topics_enabled: false } }));
     const page = await runPageScript(r, [COMMON_JS, SETUP_JS]);
-    // The token is stored already, so the page checks the bot by itself.
-    await page.waitForText('Turn on Threaded Mode for @ada_bot.');
-    expect(page.text()).toContain('Bot @ada_bot connected');
-    expect(page.text()).toContain('Without it, the agent cannot create its threads, so it cannot answer you or ask for approvals in Telegram.');
-    expect(page.text()).toContain('In Telegram, search for @BotFather and open the chat. Press Open there to start its app.');
-    expect(page.text()).toContain('Choose @ada_bot, open Bot Settings, and turn on Threaded Mode.');
-    expect(page.text()).toContain('This comes after Threaded Mode is on.');
-    expect(r.telegram.calls('getUpdates')).toHaveLength(0);
-    expect(link(page, 'Open BotFather').getAttribute('href')).toBe('https://t.me/BotFather');
-
-    // The user turns it on in BotFather and checks again. The pairing then starts by itself.
-    const note = page.find((n) => typeof n.className === 'string' && n.className.includes('topic-note'));
-    const again = note?.all().find((n) => n.tagName === 'BUTTON' && n.textContent === 'Check again');
-    await again?.fire('click');
+    // The token is stored already, so the page checks the bot by itself and the pairing starts by itself.
     await page.waitForText('Waiting for you to press Start in Telegram');
+    expect(page.text()).toContain('Bot @ada_bot connected');
     expect(page.text()).not.toContain('Threaded Mode');
-    expect(r.telegram.calls('getMe')).toHaveLength(2);
+    expect(page.find((n) => typeof n.className === 'string' && n.className.includes('topic-note'))).toBeUndefined();
+    expect(r.telegram.calls('getMe')).toHaveLength(1);
   });
 
   it('shows an error of Telegram in plain words, and keeps the token stage open', async () => {

@@ -137,7 +137,6 @@ export function createTerminalSurface(options: TerminalSurfaceOptions): Terminal
 
   return {
     id: TERMINAL_SURFACE_ID,
-    hasThreads: false,
     credentials: [],
 
     async start(h: SurfaceHost) {

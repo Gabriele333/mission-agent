@@ -26,10 +26,22 @@ describe('parseCommand', () => {
     expect(parseCommand('/stop now')).toEqual({ name: 'stop', arg: 'now' });
   });
 
-  it('returns unknown for any other text that starts with a slash', () => {
-    expect(parseCommand('/missions')).toEqual({ name: 'unknown', arg: '/missions' });
-    expect(parseCommand('/help me')).toEqual({ name: 'unknown', arg: '/help me' });
+  it('returns unknown for any other text that starts with a slash, with the word when it has the form of a command', () => {
+    expect(parseCommand('/missions')).toEqual({ name: 'unknown', arg: '/missions', word: 'missions', rest: '' });
+    expect(parseCommand('/help me')).toEqual({ name: 'unknown', arg: '/help me', word: 'help', rest: 'me' });
     expect(parseCommand('/')).toEqual({ name: 'unknown', arg: '/' });
     expect(parseCommand(' /Users/ada/file.txt ')).toEqual({ name: 'unknown', arg: '/Users/ada/file.txt' });
+  });
+
+  it('reads a command with digits and underscores, such as the command of a mission', () => {
+    expect(parseCommand('/inbox_curator check my mail')).toEqual({
+      name: 'unknown',
+      arg: '/inbox_curator check my mail',
+      word: 'inbox_curator',
+      rest: 'check my mail',
+    });
+    expect(parseCommand('/Plan_2027@ada_bot')).toEqual({ name: 'unknown', arg: '/Plan_2027@ada_bot', word: 'plan_2027', rest: '' });
+    expect(parseCommand('/inbox_curator\nline two')).toMatchObject({ word: 'inbox_curator', rest: 'line two' });
+    expect(parseCommand('/inbox-curator hi')).toEqual({ name: 'unknown', arg: '/inbox-curator hi' });
   });
 });

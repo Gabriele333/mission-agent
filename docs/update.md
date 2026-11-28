@@ -52,6 +52,12 @@ What git and npm printed is in `~/.mission-agent/maintenance.log`.
 
 Versions 0.1.x have no maintenance program. Their `update` command installs version 0.2.0 or later in the old way. The new harness then writes the maintenance program and the new command at its first start. From then on, `update` and `repair` go to the maintenance program.
 
+## From version 0.2.0
+
+Version 0.2.1 changes how the agent writes to you on Telegram. It no longer uses one thread for each mission. It writes in one chat, and a message from a mission other than the general mission starts with the mission's name. Each mission has its own command, such as `/inbox_curator`, and the bot's menu lists them. See [Telegram](configure.md#telegram).
+
+Nothing in your root folder changes. The threads that the earlier version created stay in Telegram with their messages, and the harness deletes none of them. After the update, the agent sends you one message that explains this. It writes where you last wrote, so you can go on in an old thread or leave it. You can turn off Threaded Mode for the bot in BotFather, but you do not need to.
+
 ## Repair
 
 ```
