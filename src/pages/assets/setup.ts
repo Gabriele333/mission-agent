@@ -615,6 +615,7 @@ export const SETUP_JS = `'use strict';
       el('p', { text: 'BotFather is the Telegram bot that creates bots. Only a person can do this step, so the page cannot do it for you.' }),
       el('a', { className: 'button', href: BOTFATHER, text: 'Open BotFather in Telegram' }),
       el('ol', { className: 'send-list' }, [
+        el('li', null, ['In Telegram, search for ', el('code', { text: '@BotFather' }), ' and open the chat with the blue check mark. The button above does the same when Telegram is on this computer.']),
         el('li', null, [
           'Send ', el('code', { text: '/newbot' }), '.',
           el('button', { type: 'button', className: 'quiet copy', text: 'Copy', attrs: { 'aria-label': 'Copy /newbot' }, on: { click: async function () {
@@ -625,6 +626,7 @@ export const SETUP_JS = `'use strict';
         el('li', { text: 'Send a name for the bot, such as ' + name + '.' }),
         el('li', null, ['Send a user name that ends in ', el('code', { text: 'bot' }), ', such as ', el('code', { text: 'my_agent_bot' }), '.']),
         el('li', { text: 'BotFather answers with a token. Copy it.' }),
+        el('li', { text: 'Turn on Threaded Mode. In the chat with BotFather, press Open to start its app. Choose your bot, open Bot Settings, and turn on Threaded Mode. The agent writes to you in one thread per mission, so it needs this.' }),
       ]),
       el('button', { type: 'button', className: 'secondary', text: 'I have the token', on: { click: function () { tg.haveBot = true; render(); } } }),
     ];
@@ -683,7 +685,7 @@ export const SETUP_JS = `'use strict';
     return el('div', { className: 'banner warn topic-note', attrs: { role: 'status' } }, [
       el('p', null, el('strong', { text: 'Turn on Threaded Mode for @' + bot.username + '.' })),
       el('p', { text: 'Without it, the agent cannot create its threads, so it cannot answer you or ask for approvals in Telegram.' }),
-      el('p', { text: 'In Telegram, open BotFather and press Open to start its app. Choose @' + bot.username + ', open Bot Settings, and turn on Threaded Mode.' }),
+      el('p', { text: 'In Telegram, search for @BotFather and open the chat. Press Open there to start its app. Choose @' + bot.username + ', open Bot Settings, and turn on Threaded Mode.' }),
       el('div', { className: 'row' }, [el('a', { className: 'button secondary', href: BOTFATHER, text: 'Open BotFather' }), again]),
     ]);
   }

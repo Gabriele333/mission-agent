@@ -574,7 +574,7 @@ export function createTelegramSurface(options: TelegramSurfaceOptions): Surface 
     try {
       const me = await api.call<{ has_topics_enabled?: boolean }>('getMe', {}, { signal: stop, attempts: 3 });
       if (me.has_topics_enabled !== true) {
-        report(new Error('Topic mode is off for the Telegram bot, so missions cannot have their own threads. Turn on topics for the bot in BotFather.'));
+        report(new Error('Topic mode is off for the Telegram bot, so missions cannot have their own threads. Turn on Threaded Mode in BotFather: open its app, choose the bot, and open Bot Settings.'));
       }
     } catch (err) {
       report(err);

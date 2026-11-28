@@ -270,8 +270,11 @@ describe('the Telegram part of the setup page script', () => {
     expect(botFather.getAttribute('href')).toBe('https://t.me/BotFather');
     expect(botFather.getAttribute('target')).toBe('_blank');
     expect(botFather.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(page.text()).toContain('In Telegram, search for @BotFather and open the chat with the blue check mark.');
     expect(page.text()).toContain('Send /newbot.');
     expect(page.text()).toContain('Send a user name that ends in bot');
+    // The last step of the list says how to turn on Threaded Mode, before the bot check can find it off.
+    expect(page.text()).toContain('press Open to start its app. Choose your bot, open Bot Settings, and turn on Threaded Mode.');
     expect(page.find((n) => n.id === 'secret-credential-telegram-bot-token')).toBeUndefined();
     expect(page.text()).not.toContain('Connect your account'.concat('Telegram opens'));
 
@@ -331,6 +334,7 @@ describe('the Telegram part of the setup page script', () => {
     await page.waitForText('Turn on Threaded Mode for @ada_bot.');
     expect(page.text()).toContain('Bot @ada_bot connected');
     expect(page.text()).toContain('Without it, the agent cannot create its threads, so it cannot answer you or ask for approvals in Telegram.');
+    expect(page.text()).toContain('In Telegram, search for @BotFather and open the chat. Press Open there to start its app.');
     expect(page.text()).toContain('Choose @ada_bot, open Bot Settings, and turn on Threaded Mode.');
     expect(page.text()).toContain('This comes after Threaded Mode is on.');
     expect(r.telegram.calls('getUpdates')).toHaveLength(0);
